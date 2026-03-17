@@ -35,7 +35,7 @@ def estimate_fwhm(
     y: NDArray[np.floating],
     fwhm_init: float = 3.0,
     *,
-    size: int = 7,
+    half_size: int = 7,
     maxiters: int = 100,
     fwhm_min: float = 0.5,
     fwhm_max: float = 20.0,
@@ -74,7 +74,7 @@ def estimate_fwhm(
     data = np.asarray(data, dtype=float, order="C")
     if data.ndim != 2:
         raise ValueError("data must be a 2D array")
-    if size <= 0:
+    if half_size <= 0:
         raise ValueError("size must be a positive integer")
 
     # Global background (used if local background disabled)
@@ -84,7 +84,7 @@ def estimate_fwhm(
     fwhm_values: list[float] = []
 
     # Precompute local grid for speed
-    n = 2 * size + 1
+    n = 2 * half_size + 1
     yy, xx = np.mgrid[:n, :n]
     sx0 = sy0 = fwhm_init / GAUSSIAN_FWHM
 
@@ -97,10 +97,10 @@ def estimate_fwhm(
         yi = int(round(yc))
 
         # Ensure cutout is fully within the image bounds
-        if not (size <= xi < nx - size and size <= yi < ny - size):
+        if not (half_size <= xi < nx - half_size and half_size <= yi < ny - half_size):
             continue
 
-        cut = data[yi - size : yi + size + 1, xi - size : xi + size + 1]
+        cut = data[yi - half_size : yi + half_size + 1, xi - half_size : xi + half_size + 1]
         if cut.shape != (n, n) or not np.isfinite(cut).all():
             continue
 
@@ -111,8 +111,8 @@ def estimate_fwhm(
         # Initial elliptical Gaussian
         g0 = models.Gaussian2D(
             amplitude=cut_sub.max(),
-            x_mean=xc - (xi - size),
-            y_mean=yc - (yi - size),
+            x_mean=xc - (xi - half_size),
+            y_mean=yc - (yi - half_size),
             x_stddev=sx0,
             y_stddev=sy0,
         )
@@ -142,7 +142,7 @@ if __name__ == "__main__":
     import time
     parser = argparse.ArgumentParser(description="Estimate median stellar FWHM from a FITS image.")
     parser.add_argument("path", type=str, help="Path to the FITS image file.")
-    parser.add_argument("--size", type=int, default=7, help="Half-size of fit cutout (window is 2*size+1).")
+    parser.add_argument("--half-size", type=int, default=7, help="Half-size of fit cutout (window is 2*size+1).")
     parser.add_argument("--maxiters", type=int, default=100, help="Max iterations for the LM fitter.")
     parser.add_argument("--fwhm-min", type=float, default=0.5, help="Minimum acceptable per-star FWHM.")
     parser.add_argument("--fwhm-max", type=float, default=20.0, help="Maximum acceptable per-star FWHM.")
@@ -169,7 +169,7 @@ if __name__ == "__main__":
         sources["xcentroid"],
         sources["ycentroid"],
         fwhm_init=args.fwhm_init,
-        size=args.size,
+        half_size=args.half_size,
         maxiters=args.maxiters,
         fwhm_min=args.fwhm_min,
         fwhm_max=args.fwhm_max,

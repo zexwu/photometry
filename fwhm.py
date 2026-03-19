@@ -7,6 +7,7 @@ from scipy.optimize import curve_fit
 
 GAUSSIAN_FWHM = 2.0 * np.sqrt(2.0 * np.log(2.0))
 
+
 def _gaussian_2d(xy, amplitude, x_mean, y_mean, x_stddev, y_stddev, theta):
     x, y = xy
 
@@ -22,6 +23,7 @@ def _gaussian_2d(xy, amplitude, x_mean, y_mean, x_stddev, y_stddev, theta):
     return amplitude * np.exp(
         -0.5 * ((x_prime / x_stddev) ** 2 + (y_prime / y_stddev) ** 2)
     )
+
 
 def _local_background(cut: NDArray[np.floating]) -> float:
     """Estimate a robust local background for a cutout.
@@ -95,9 +97,7 @@ def estimate_fwhm(
 
     yyxx = (yy.ravel(), xx.ravel())
 
-
     for xc, yc in zip(x, y):
-
         xi = int(round(xc))
         yi = int(round(yc))
 
@@ -105,7 +105,9 @@ def estimate_fwhm(
         if not (half_size <= xi < nx - half_size and half_size <= yi < ny - half_size):
             continue
 
-        cut = data[yi - half_size : yi + half_size + 1, xi - half_size : xi + half_size + 1]
+        cut = data[
+            yi - half_size : yi + half_size + 1, xi - half_size : xi + half_size + 1
+        ]
         if cut.shape != (n, n) or not np.isfinite(cut).all():
             continue
 
@@ -113,9 +115,16 @@ def estimate_fwhm(
         bkg = _local_background(cut) if use_local_bkg else float(median)
         cut_sub = cut - bkg
 
-        p0 = [cut_sub.max(), xc - (xi - half_size), yc - (yi - half_size), sx0, sy0, 0.0]
-        lower_bounds = [0, 0, 0, 1.0, 1.0, -np.pi/2]
-        upper_bounds = [np.inf, 2*half_size, 2*half_size, 15.0, 15.0, np.pi/2]
+        p0 = [
+            cut_sub.max(),
+            xc - (xi - half_size),
+            yc - (yi - half_size),
+            sx0,
+            sy0,
+            0.0,
+        ]
+        lower_bounds = [0, 0, 0, 1.0, 1.0, -np.pi / 2]
+        upper_bounds = [np.inf, 2 * half_size, 2 * half_size, 15.0, 15.0, np.pi / 2]
         try:
             popt, _ = curve_fit(
                 _gaussian_2d,
@@ -123,12 +132,12 @@ def estimate_fwhm(
                 cut_sub.ravel(),
                 p0=p0,
                 bounds=(lower_bounds, upper_bounds),
-                maxfev=maxiters
+                maxfev=maxiters,
             )
         except RuntimeError:
-            continue # Fit failed to converge
+            continue  # Fit failed to converge
         except ValueError:
-            continue # Invalid data inputs
+            continue  # Invalid data inputs
 
         _, _, _, sx, sy, _ = popt
 
@@ -147,18 +156,38 @@ def estimate_fwhm(
 
 
 if __name__ == "__main__":
-
     import time
     import argparse
-    parser = argparse.ArgumentParser(description="Estimate median stellar FWHM from a FITS image.")
-    parser.add_argument("path", type=str, help="Path to the FITS image file.")
-    parser.add_argument("--half-size", type=int, default=7, help="Half-size of fit cutout (window is 2*size+1).")
-    parser.add_argument("--maxiters", type=int, default=100, help="Max iterations for the LM fitter.")
-    parser.add_argument("--fwhm-min", type=float, default=0.5, help="Minimum acceptable per-star FWHM.")
-    parser.add_argument("--fwhm-max", type=float, default=20.0, help="Maximum acceptable per-star FWHM.")
 
-    parser.add_argument("--sigma-threshold", type=float, default=5.0, help="DAOStarFinder threshold in sigma units.")
-    parser.add_argument("--fwhm-init", type=float, default=3.0, help="Initial FWHM guess in pixels.")
+    parser = argparse.ArgumentParser(
+        description="Estimate median stellar FWHM from a FITS image."
+    )
+    parser.add_argument("path", type=str, help="Path to the FITS image file.")
+    parser.add_argument(
+        "--half-size",
+        type=int,
+        default=7,
+        help="Half-size of fit cutout (window is 2*size+1).",
+    )
+    parser.add_argument(
+        "--maxiters", type=int, default=100, help="Max iterations for the LM fitter."
+    )
+    parser.add_argument(
+        "--fwhm-min", type=float, default=0.5, help="Minimum acceptable per-star FWHM."
+    )
+    parser.add_argument(
+        "--fwhm-max", type=float, default=20.0, help="Maximum acceptable per-star FWHM."
+    )
+
+    parser.add_argument(
+        "--sigma-threshold",
+        type=float,
+        default=5.0,
+        help="DAOStarFinder threshold in sigma units.",
+    )
+    parser.add_argument(
+        "--fwhm-init", type=float, default=3.0, help="Initial FWHM guess in pixels."
+    )
     parser.add_argument(
         "--no-local-bkg",
         action="store_true",
@@ -167,11 +196,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     from astropy.io import fits
+
     with fits.open(args.path, memmap=True) as hdul:
         data = np.asarray(hdul[0].data, dtype=float)
 
     _, median, std = sigma_clipped_stats(data, sigma=3.0)
     from photutils.detection import DAOStarFinder
+
     finder = DAOStarFinder(fwhm=args.fwhm_init, threshold=args.sigma_threshold * std)
     sources = finder(data - median)
 

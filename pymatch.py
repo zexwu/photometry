@@ -85,7 +85,9 @@ class MatchResult:
     inlier_count: int
 
 
-def _triangle_space(x: NDArray, y: NDArray, tris: NDArray) -> Tuple[NDArray, NDArray, NDArray, NDArray]:
+def _triangle_space(
+    x: NDArray, y: NDArray, tris: NDArray
+) -> Tuple[NDArray, NDArray, NDArray, NDArray]:
     """Compute triangle-space coordinates and metadata.
 
     For each triangle (i, j, k):
@@ -96,7 +98,9 @@ def _triangle_space(x: NDArray, y: NDArray, tris: NDArray) -> Tuple[NDArray, NDA
     Returns ``(b_over_a, c_over_a, ords, ori)``.
     """
 
-    i = tris[:, 0]; j = tris[:, 1]; k = tris[:, 2]
+    i = tris[:, 0]
+    j = tris[:, 1]
+    k = tris[:, 2]
     s0 = (x[j] - x[k]) ** 2 + (y[j] - y[k]) ** 2
     s1 = (x[k] - x[i]) ** 2 + (y[k] - y[i]) ** 2
     s2 = (x[i] - x[j]) ** 2 + (y[i] - y[j]) ** 2
@@ -108,8 +112,10 @@ def _triangle_space(x: NDArray, y: NDArray, tris: NDArray) -> Tuple[NDArray, NDA
     with np.errstate(divide="ignore", invalid="ignore"):
         b_over_a = np.sqrt(np.maximum(smid, 0) / np.maximum(smax, 1e-32))
         c_over_a = np.sqrt(np.maximum(smin, 0) / np.maximum(smax, 1e-32))
-    v1x = x[j] - x[i]; v1y = y[j] - y[i]
-    v2x = x[k] - x[i]; v2y = y[k] - y[i]
+    v1x = x[j] - x[i]
+    v1y = y[j] - y[i]
+    v2x = x[k] - x[i]
+    v2y = y[k] - y[i]
     cross = v1x * v2y - v1y * v2x
     ori = np.where(cross >= 0.0, 1, -1)
     return b_over_a, c_over_a, ords.astype(np.int64), ori.astype(np.int64)
@@ -135,9 +141,9 @@ def _kdtree_mutual_nn(
     d_f, j_f = treeB.query(A, k=1)
     treeA = cKDTree(A)
     _, i_b = treeA.query(B, k=1)
-    mask = (i_b[j_f] == np.arange(A.shape[0]))
+    mask = i_b[j_f] == np.arange(A.shape[0])
     if radius is not None:
-        mask &= (d_f <= radius)
+        mask &= d_f <= radius
     if not np.any(mask):
         return np.empty((0, 2), dtype=np.int64)
     i_idx = np.nonzero(mask)[0]
@@ -167,7 +173,11 @@ def _accumulate_votes(
     for the compacted sets ``used_ref`` and ``used_inp``.
     """
     if matches.size == 0:
-        return np.zeros((0, 0), dtype=np.int64), np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
+        return (
+            np.zeros((0, 0), dtype=np.int64),
+            np.empty(0, dtype=np.int64),
+            np.empty(0, dtype=np.int64),
+        )
     used_ref = np.unique(ref_tris[matches[:, 0]].ravel())
     used_inp = np.unique(inp_tris[matches[:, 1]].ravel())
     map_r = -np.ones(n_ref, dtype=np.int64)
@@ -183,9 +193,10 @@ def _accumulate_votes(
         for pos in range(3):
             sref = ref_ord[tr, pos]
             sinp = inp_ord[ti, pos]
-            vref = (r0 if sref == 0 else (r1 if sref == 1 else r2))
-            vinp = (i0 if sinp == 0 else (i1 if sinp == 1 else i2))
-            lr = map_r[vref]; li = map_i[vinp]
+            vref = r0 if sref == 0 else (r1 if sref == 1 else r2)
+            vinp = i0 if sinp == 0 else (i1 if sinp == 1 else i2)
+            lr = map_r[vref]
+            li = map_i[vinp]
             if lr >= 0 and li >= 0:
                 votes[lr, li] += w
     return votes, used_ref, used_inp
@@ -212,7 +223,9 @@ def _prune_limit(d2_sorted: NDArray, md2_soft: float) -> int:
     return lim
 
 
-def _umeyama_similarity(src: NDArray, dst: NDArray, allow_reflection: bool = False) -> Similarity:
+def _umeyama_similarity(
+    src: NDArray, dst: NDArray, allow_reflection: bool = False
+) -> Similarity:
     """Umeyama's similarity fit (uniform scale, no shear).
 
     Parameters
@@ -274,14 +287,32 @@ def match_stars(
     - If Delaunay triangulation fails to produce triangles in either set, the
       function falls back to a translation-only guess and mutual-NN.
     """
-    if inp_xy.ndim != 2 or ref_xy.ndim != 2 or inp_xy.shape[1] != 2 or ref_xy.shape[1] != 2:
+    if (
+        inp_xy.ndim != 2
+        or ref_xy.ndim != 2
+        or inp_xy.shape[1] != 2
+        or ref_xy.shape[1] != 2
+    ):
         raise ValueError("ref_xy and inp_xy must be (N,2) arrays")
     if len(inp_xy) < 3 or len(ref_xy) < 3:
         A = np.eye(2)
         t = np.mean(ref_xy, axis=0) - np.mean(inp_xy, axis=0)
         T = Similarity(A=A, t=t)
         pairs = _kdtree_mutual_nn(T.apply(inp_xy), ref_xy, radius=max_distance)
-        rms = float(np.sqrt(np.mean(np.sum((T.apply(inp_xy[pairs[:, 0]]) - ref_xy[pairs[:, 1]]) ** 2, axis=1)))) if len(pairs) else float("inf")
+        rms = (
+            float(
+                np.sqrt(
+                    np.mean(
+                        np.sum(
+                            (T.apply(inp_xy[pairs[:, 0]]) - ref_xy[pairs[:, 1]]) ** 2,
+                            axis=1,
+                        )
+                    )
+                )
+            )
+            if len(pairs)
+            else float("inf")
+        )
         return MatchResult(transform=T, pairs=pairs, rms=rms, inlier_count=len(pairs))
     if max_distance <= 0:
         raise ValueError("max_distance must be positive")
@@ -289,18 +320,44 @@ def match_stars(
     # Delaunay triangles on a subset of points
     n_ref_tri = min(len(inp_xy), tri_build_points)
     n_inp_tri = min(len(ref_xy), tri_build_points)
-    ref_tris = Delaunay(inp_xy[:n_ref_tri]).simplices.astype(np.int64) if n_ref_tri >= 3 else np.empty((0, 3), dtype=np.int64)
-    inp_tris = Delaunay(ref_xy[:n_inp_tri]).simplices.astype(np.int64) if n_inp_tri >= 3 else np.empty((0, 3), dtype=np.int64)
+    ref_tris = (
+        Delaunay(inp_xy[:n_ref_tri]).simplices.astype(np.int64)
+        if n_ref_tri >= 3
+        else np.empty((0, 3), dtype=np.int64)
+    )
+    inp_tris = (
+        Delaunay(ref_xy[:n_inp_tri]).simplices.astype(np.int64)
+        if n_inp_tri >= 3
+        else np.empty((0, 3), dtype=np.int64)
+    )
     if ref_tris.size == 0 or inp_tris.size == 0:
-        A = np.eye(2); t = np.mean(ref_xy, axis=0) - np.mean(inp_xy, axis=0)
+        A = np.eye(2)
+        t = np.mean(ref_xy, axis=0) - np.mean(inp_xy, axis=0)
         T = Similarity(A=A, t=t)
         pairs = _kdtree_mutual_nn(T.apply(inp_xy), ref_xy, radius=max_distance)
-        rms = float(np.sqrt(np.mean(np.sum((T.apply(inp_xy[pairs[:, 0]]) - ref_xy[pairs[:, 1]]) ** 2, axis=1)))) if len(pairs) else float("inf")
+        rms = (
+            float(
+                np.sqrt(
+                    np.mean(
+                        np.sum(
+                            (T.apply(inp_xy[pairs[:, 0]]) - ref_xy[pairs[:, 1]]) ** 2,
+                            axis=1,
+                        )
+                    )
+                )
+            )
+            if len(pairs)
+            else float("inf")
+        )
         return MatchResult(transform=T, pairs=pairs, rms=rms, inlier_count=len(pairs))
 
     # Triangle-space mapping
-    ref_ba, ref_ca, ref_ord, ref_parity = _triangle_space(inp_xy[:, 0], inp_xy[:, 1], ref_tris)
-    inp_ba, inp_ca, inp_ord, inp_parity = _triangle_space(ref_xy[:, 0], ref_xy[:, 1], inp_tris)
+    ref_ba, ref_ca, ref_ord, ref_parity = _triangle_space(
+        inp_xy[:, 0], inp_xy[:, 1], ref_tris
+    )
+    inp_ba, inp_ca, inp_ord, inp_parity = _triangle_space(
+        ref_xy[:, 0], ref_xy[:, 1], inp_tris
+    )
 
     best_T = None
     best_pairs = None
@@ -314,17 +371,27 @@ def match_stars(
         tri_radius_eff *= 6.0
 
     # Symmetric matching in triangle-space (mutual 1-NN)
-    ref_ccw = (ref_parity == 1)
-    inp_ccw = (inp_parity == 1)
+    ref_ccw = ref_parity == 1
+    inp_ccw = inp_parity == 1
     ref_ts = np.column_stack([ref_ba[ref_ccw], ref_ca[ref_ccw]])
     inp_ts = np.column_stack([inp_ba[inp_ccw], inp_ca[inp_ccw]])
     ref_tris_ccw = ref_tris[ref_ccw]
     inp_tris_ccw = inp_tris[inp_ccw]
     ref_ord_ccw = ref_ord[ref_ccw]
     inp_ord_ccw = inp_ord[inp_ccw]
-    tri_matches = _kdtree_mutual_nn(ref_ts, inp_ts, radius=tri_radius_eff, sort_by_distance=True)
+    tri_matches = _kdtree_mutual_nn(
+        ref_ts, inp_ts, radius=tri_radius_eff, sort_by_distance=True
+    )
     # Vote accumulation and greedy conflict-free selection
-    vote_grid, used_ref, used_inp = _accumulate_votes(ref_tris_ccw, ref_ord_ccw, inp_tris_ccw, inp_ord_ccw, tri_matches, len(inp_xy), len(ref_xy))
+    vote_grid, used_ref, used_inp = _accumulate_votes(
+        ref_tris_ccw,
+        ref_ord_ccw,
+        inp_tris_ccw,
+        inp_ord_ccw,
+        tri_matches,
+        len(inp_xy),
+        len(ref_xy),
+    )
     nz = np.argwhere(vote_grid > 0)
     vals = vote_grid[vote_grid > 0]
     order = np.argsort(-vals)
@@ -332,8 +399,10 @@ def match_stars(
     used_inp_mask = np.zeros(len(ref_xy), dtype=bool)
     vote_pairs = []
     for pos in order:
-        lr = int(nz[pos, 0]); li = int(nz[pos, 1])
-        r = int(used_ref[lr]); j = int(used_inp[li])
+        lr = int(nz[pos, 0])
+        li = int(nz[pos, 1])
+        r = int(used_ref[lr])
+        j = int(used_inp[li])
         if used_ref_mask[r] or used_inp_mask[j]:
             continue
         vote_pairs.append((r, j))
@@ -342,7 +411,7 @@ def match_stars(
     vote_pairs = np.array(vote_pairs, dtype=int)
     # Use a compact, high-confidence seed to estimate the initial transform.
     seed_size_eff = min(int(seed_size), vote_pairs.shape[0])
-    seed_pairs = vote_pairs[: seed_size_eff]
+    seed_pairs = vote_pairs[:seed_size_eff]
     for it in range(2):
         src = inp_xy[seed_pairs[:, 0]]
         dst = ref_xy[seed_pairs[:, 1]]
@@ -373,7 +442,9 @@ def match_stars(
         rms = float(np.sqrt(np.mean(np.sum(err * err, axis=1))))
     else:
         rms = float("inf")
-    return MatchResult(transform=best_T, pairs=best_pairs, rms=rms, inlier_count=best_pairs.shape[0])
+    return MatchResult(
+        transform=best_T, pairs=best_pairs, rms=rms, inlier_count=best_pairs.shape[0]
+    )
 
 
 __all__ = ["Similarity", "MatchResult", "match_stars"]

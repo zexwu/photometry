@@ -1,3 +1,5 @@
+"""Source-detection and FWHM-estimation helpers."""
+
 from __future__ import annotations
 
 import numpy as np
@@ -6,11 +8,11 @@ from numpy.typing import NDArray
 from photutils.background import Background2D, MedianBackground
 from photutils.detection import DAOStarFinder
 
-from .catalog import StarCatalog
-from .fwhm import estimate_fwhm
+from .catalog import Catalog
 
 
 def flux_to_mag(flux: NDArray, zeropoint: float) -> NDArray:
+    """Convert flux to magnitude with a given zeropoint."""
     with np.errstate(divide="ignore", invalid="ignore"):
         mag = -2.5 * np.log10(flux) + zeropoint
         mag = np.where(flux > 0, mag, np.nan)
@@ -18,6 +20,7 @@ def flux_to_mag(flux: NDArray, zeropoint: float) -> NDArray:
 
 
 def flux_err_to_mag_err(flux: NDArray, flux_err: NDArray) -> NDArray:
+    """Propagate flux error to magnitude error."""
     with np.errstate(divide="ignore", invalid="ignore"):
         k = 2.5 / np.log(10.0)
         merr = k * np.abs(flux_err / flux)
@@ -32,7 +35,11 @@ def detect_star_catalog(
     threshold_sigma: float,
     saturation_level: float,
     use_background: bool,
-) -> tuple[StarCatalog, float, NDArray | None, float]:
+) -> tuple[Catalog, float, NDArray | None, float]:
+    """Detect stars and return catalog plus background statistics.
+
+    Returns ``(catalog, background_scalar, background2d_or_none, detect_std)``.
+    """
     background2d = None
     if use_background:
         min_dim = min(data.shape)
@@ -70,13 +77,13 @@ def detect_star_catalog(
     sources = finder(det_data)
 
     if sources is None or len(sources) == 0:
-        return StarCatalog(), background, background2d, float(std)
+        return Catalog(), background, background2d, float(std)
 
     sources = sources[sources["peak"] < saturation_level]
     flux = np.asarray(sources["flux"], dtype=float)
     fluxerr = np.sqrt(np.clip(flux, 0.0, None))
 
-    catalog = StarCatalog.from_arrays(
+    catalog = Catalog.from_arrays(
         x=np.asarray(sources["xcentroid"], dtype=float),
         y=np.asarray(sources["ycentroid"], dtype=float),
         mag=flux_to_mag(flux, zeropoint=0.0),
@@ -84,14 +91,3 @@ def detect_star_catalog(
     )
     return catalog, background, background2d, float(std)
 
-
-def estimate_catalog_fwhm(
-    data: NDArray,
-    catalog: StarCatalog,
-    *,
-    max_stars: int,
-    half_size: int,
-) -> tuple[float, int]:
-    ind = np.argsort(catalog.mag)[:max_stars]
-    fwhm = estimate_fwhm(data, catalog.x[ind], catalog.y[ind], half_size=half_size)
-    return float(fwhm), int(len(ind))

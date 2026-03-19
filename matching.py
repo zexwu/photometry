@@ -1,19 +1,24 @@
+"""Catalog-to-catalog geometric/magnitude transformation helpers."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Callable
 
+import matplotlib.pyplot as plt
 import numpy as np
 from astropy.stats import sigma_clipped_stats
 from numpy.typing import NDArray
 
-from .catalog import StarCatalog
-from .pymatch import Similarity, match_stars
+from .catalog import Catalog
+from .pymatch import Transformation, match_stars
 
 
 @dataclass
 class MatchSolution:
-    transform: Similarity
+    """Container for an intermediate matching/fit solution."""
+
+    transform: Transformation
     id1: NDArray
     id2: NDArray
     use: NDArray
@@ -26,13 +31,14 @@ class MatchSolution:
 
 
 def solve_catalog_transform(
-    target: StarCatalog,
-    ref: StarCatalog,
+    target: Catalog,
+    ref: Catalog,
     *,
     flip: bool,
     superflat_order: tuple[int, int],
     select: Callable,
 ) -> MatchSolution:
+    """Solve coordinate/magnitude alignment from target catalog to reference."""
     if min(target.nstars, ref.nstars) < 3:
         raise ValueError(f"not enough stars self={target.nstars} ref={ref.nstars}")
 
@@ -65,7 +71,7 @@ def solve_catalog_transform(
             maxiters=25,
             stdfunc="mad_std",
         )
-        n_used = int(len(diff[use]))
+        n_used = len(diff[use])
 
     return MatchSolution(
         transform=res.transform,
@@ -81,17 +87,150 @@ def solve_catalog_transform(
     )
 
 
-def apply_solution(catalog: StarCatalog, solution: MatchSolution) -> StarCatalog:
+def apply_solution(catalog: Catalog, solution: MatchSolution) -> Catalog:
+    """Apply solved transformation and error inflation to a full catalog."""
     mag = catalog.mag - solution.med
     mag_err = np.sqrt(catalog.mag_err**2 + solution.std**2 / solution.n_used)
     x, y = solution.transform.apply(np.c_[catalog.x, catalog.y]).T
 
-    return StarCatalog.from_arrays(
+    return Catalog.from_arrays(
         x=x,
         y=y,
         mag=mag,
         mag_err=mag_err,
     )
+
+
+def plot_transform_diagnostics(
+    target: Catalog,
+    ref: Catalog,
+    solution: MatchSolution,
+) -> None:
+    """Plot coordinate and residual diagnostics for a solved transform."""
+    plot_x = target.x[solution.id1][solution.use]
+    plot_y = target.y[solution.id1][solution.use]
+    ref_mag = ref.mag[solution.id2][solution.use]
+    plot_err = solution.err[solution.use]
+
+    model_vals = (
+        solution.med[solution.id1][solution.use] if solution.superflat else solution.med
+    )
+    residuals = solution.diff[solution.use] - model_vals
+    inliers = np.abs(residuals) < (3.0 * solution.std)
+    outliers = ~inliers
+
+    fig, axs = plt.subplots(2, 2, figsize=(10, 8))
+    axs = axs.ravel()
+    ebar_kwargs = dict(fmt="o", fillstyle="none", markersize=4, lw=0.7, alpha=0.6)
+
+    axs[0].scatter(
+        ref.x[solution.id2],
+        ref.y[solution.id2],
+        s=15,
+        fc="none",
+        ec="r",
+        lw=1,
+        label="Ref",
+    )
+    axs[0].scatter(
+        target.x[solution.id1],
+        target.y[solution.id1],
+        s=15,
+        marker="x",
+        lw=1,
+        c="b",
+        label="Target",
+    )
+    axs[0].set_title("Matched Star Coordinates")
+    axs[0].set_xlabel("X [px]")
+    axs[0].set_ylabel("Y [px]")
+    axs[0].legend()
+
+    if np.any(outliers):
+        axs[1].errorbar(
+            ref_mag[outliers],
+            residuals[outliers],
+            yerr=plot_err[outliers],
+            c="C1",
+            label="Rejected",
+            **ebar_kwargs,
+        )
+    if np.any(inliers):
+        axs[1].errorbar(
+            ref_mag[inliers],
+            residuals[inliers],
+            yerr=plot_err[inliers],
+            c="C0",
+            label="Used",
+            **ebar_kwargs,
+        )
+    axs[1].axhline(0, c="r", lw=1.5, ls="--")
+    axs[1].set_ylim(0.3, -0.3)
+    axs[1].set_xlabel("Ref Mag")
+    axs[1].set_ylabel("Residual (img - ref - model)")
+    axs[1].set_title("Magnitude Residuals")
+
+    mode_str = "Superflat 2D Plane" if solution.superflat else "Standard Scalar"
+    stat_text = f"Mode: {mode_str}\nScatter (std): {solution.std:.3f}\nStars used: {np.sum(inliers)}"
+    axs[1].text(
+        0.05,
+        0.95,
+        stat_text,
+        transform=axs[1].transAxes,
+        va="top",
+        ha="left",
+        bbox=dict(facecolor="white", alpha=0.8, edgecolor="none"),
+    )
+
+    if np.any(outliers):
+        axs[2].errorbar(
+            plot_x[outliers],
+            residuals[outliers],
+            yerr=plot_err[outliers],
+            c="C1",
+            label="Rejected",
+            **ebar_kwargs,
+        )
+    if np.any(inliers):
+        axs[2].errorbar(
+            plot_x[inliers],
+            residuals[inliers],
+            yerr=plot_err[inliers],
+            c="C0",
+            label="Used",
+            **ebar_kwargs,
+        )
+    axs[2].axhline(0, c="r", lw=1.5, ls="--")
+    axs[2].set_ylim(0.3, -0.3)
+    axs[2].set_xlabel("X [px]")
+    axs[2].set_ylabel("Residual (img - ref - model)")
+    axs[2].set_title("Spatial Residuals (X)")
+
+    if np.any(outliers):
+        axs[3].errorbar(
+            plot_y[outliers],
+            residuals[outliers],
+            yerr=plot_err[outliers],
+            c="C1",
+            label="Rejected",
+            **ebar_kwargs,
+        )
+    if np.any(inliers):
+        axs[3].errorbar(
+            plot_y[inliers],
+            residuals[inliers],
+            yerr=plot_err[inliers],
+            c="C0",
+            label="Used",
+            **ebar_kwargs,
+        )
+    axs[3].axhline(0, c="r", lw=1.5, ls="--")
+    axs[3].set_ylim(0.3, -0.3)
+    axs[3].set_xlabel("Y [px]")
+    axs[3].set_ylabel("Residual (img - ref - model)")
+    axs[3].set_title("Spatial Residuals (Y)")
+
+    fig.tight_layout()
 
 
 def _poly_basis(
@@ -100,6 +239,7 @@ def _poly_basis(
     order_x: int,
     order_y: int,
 ) -> NDArray:
+    """Build a dense 2D polynomial design matrix."""
     terms = []
     for i in range(order_x + 1):
         for j in range(order_y + 1):
@@ -108,12 +248,13 @@ def _poly_basis(
 
 
 def _solve_superflat(
-    target: StarCatalog,
+    target: Catalog,
     id1: NDArray,
     use: NDArray,
     diff: NDArray,
     superflat_order: tuple[int, int],
 ) -> tuple[NDArray, float, int]:
+    """Fit iterative sigma-clipped 2D superflat correction."""
     order_x, order_y = superflat_order
 
     x_fit, y_fit = target.x[id1][use], target.y[id1][use]

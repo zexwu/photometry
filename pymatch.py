@@ -34,8 +34,8 @@ from scipy.spatial import Delaunay, cKDTree
 
 
 @dataclass(frozen=True)
-class Similarity:
-    """2D similarity transform.
+class Transformation:
+    """2D geometric transformation (uniform scale + rotation + translation).
 
     The transform maps a point ``x`` in the reference frame to the input frame
     as ``x' = A @ x + t`` where ``A = s * R`` is a scaled rotation (uniform
@@ -73,13 +73,13 @@ class Similarity:
 class MatchResult:
     """Result of star-list matching.
 
-    - ``transform``: estimated similarity transform mapping ref → input.
+    - ``transform``: estimated transformation mapping ref → input.
     - ``pairs``: array of index pairs into (ref, input), shape (K, 2).
     - ``rms``: RMS error in input frame across ``pairs`` after the final fit.
     - ``inlier_count``: number of matched pairs (``pairs.shape[0]``).
     """
 
-    transform: Similarity
+    transform: Transformation
     pairs: NDArray  # shape (K, 2) indices into (ref, inp)
     rms: float
     inlier_count: int
@@ -223,10 +223,10 @@ def _prune_limit(d2_sorted: NDArray, md2_soft: float) -> int:
     return lim
 
 
-def _umeyama_similarity(
+def _umeyama_transformation(
     src: NDArray, dst: NDArray, allow_reflection: bool = False
-) -> Similarity:
-    """Umeyama's similarity fit (uniform scale, no shear).
+) -> Transformation:
+    """Umeyama fit for a 2D uniform-scale rigid transformation.
 
     Parameters
     - ``src``, ``dst``: shape (N, 2). If ``allow_reflection`` is False and the
@@ -253,7 +253,7 @@ def _umeyama_similarity(
     c = (np.trace(np.diag(D) @ S)) / (var_x + 1e-32)
     A = c * R
     t = mu_y - (A @ mu_x)
-    return Similarity(A=A, t=t)
+    return Transformation(A=A, t=t)
 
 
 def match_stars(
@@ -265,7 +265,7 @@ def match_stars(
     tri_match_radius: float = 0.05,
     seed_size: int = 30,
 ) -> MatchResult:
-    """Match two 2D point sets and estimate a similarity transform.
+    """Match two 2D point sets and estimate a transformation.
 
     Parameters
     - ``inp_xy``: (N2, 2) input coordinates.
@@ -297,7 +297,7 @@ def match_stars(
     if len(inp_xy) < 3 or len(ref_xy) < 3:
         A = np.eye(2)
         t = np.mean(ref_xy, axis=0) - np.mean(inp_xy, axis=0)
-        T = Similarity(A=A, t=t)
+        T = Transformation(A=A, t=t)
         pairs = _kdtree_mutual_nn(T.apply(inp_xy), ref_xy, radius=max_distance)
         rms = (
             float(
@@ -333,7 +333,7 @@ def match_stars(
     if ref_tris.size == 0 or inp_tris.size == 0:
         A = np.eye(2)
         t = np.mean(ref_xy, axis=0) - np.mean(inp_xy, axis=0)
-        T = Similarity(A=A, t=t)
+        T = Transformation(A=A, t=t)
         pairs = _kdtree_mutual_nn(T.apply(inp_xy), ref_xy, radius=max_distance)
         rms = (
             float(
@@ -415,7 +415,7 @@ def match_stars(
     for it in range(2):
         src = inp_xy[seed_pairs[:, 0]]
         dst = ref_xy[seed_pairs[:, 1]]
-        Ttmp = _umeyama_similarity(src, dst)
+        Ttmp = _umeyama_transformation(src, dst)
         d2 = np.sum((Ttmp.apply(src) - dst) ** 2, axis=1)
         order_d = np.argsort(d2)
         # Prune: first pass without tight cap, second pass with soft cap
@@ -426,10 +426,10 @@ def match_stars(
         seed_pairs = seed_pairs[order_d[:lim]]
         if seed_pairs.shape[0] < 3:
             break
-    T0 = _umeyama_similarity(inp_xy[seed_pairs[:, 0]], ref_xy[seed_pairs[:, 1]])
+    T0 = _umeyama_transformation(inp_xy[seed_pairs[:, 0]], ref_xy[seed_pairs[:, 1]])
     pairs = _kdtree_mutual_nn(T0.apply(inp_xy), ref_xy, radius=max_distance)
     if pairs.shape[0] >= 3:
-        T1 = _umeyama_similarity(inp_xy[pairs[:, 0]], ref_xy[pairs[:, 1]])
+        T1 = _umeyama_transformation(inp_xy[pairs[:, 0]], ref_xy[pairs[:, 1]])
         pairs = _kdtree_mutual_nn(T1.apply(inp_xy), ref_xy, radius=max_distance)
         best_T = T1
         best_pairs = pairs
@@ -447,4 +447,4 @@ def match_stars(
     )
 
 
-__all__ = ["Similarity", "MatchResult", "match_stars"]
+__all__ = ["Transformation", "MatchResult", "match_stars"]

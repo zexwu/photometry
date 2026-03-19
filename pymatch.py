@@ -248,9 +248,9 @@ def match_stars(
     ref_xy: NDArray,
     max_distance: float,
     *,
-    tri_build_points: int = 2048,
-    tri_match_radius: float = 0.03,
-    seed_size: int = 80,
+    tri_build_points: int = 4096,
+    tri_match_radius: float = 0.05,
+    seed_size: int = 30,
 ) -> MatchResult:
     """Match two 2D point sets and estimate a similarity transform.
 

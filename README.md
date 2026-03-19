@@ -34,6 +34,10 @@ ref = (
     .apphot()
 )
 
+ref.show(percentile=(1, 99))
+import matplotlib.pyplot as plt
+plt.show()
+
 img = (
     Image(path="./sci/sci_frame.fits")
     .detect_star()
@@ -42,9 +46,13 @@ img = (
     .apphot()
 )
 
+# geometric transformation estimation and image transformation
 img = img.transform_to(ref, inspect=True)
+
+# get target photometry
 idx = np.hypot(img.catalog.x - 201, img.catalog.y - 200).argmin()
 print(img.catalog.mag[idx], img.catalog.mag_err[idx])
+
 ```
 
 ## Scope

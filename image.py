@@ -66,27 +66,7 @@ def _step(*, error_flag: int | None = None):
 
 
 @dataclass(kw_only=True)
-class IO:
-    def dump(self, filename: str | None = None) -> None:
-        """Serialize the image object to a pickle file."""
-        if not filename:
-            filename = self.path.stem + ".pkl"
-        with open(filename, "wb") as f:
-            pickle.dump(self, f)
-
-    @staticmethod
-    def load(filename: str) -> IO:
-        """Load a pickled image object."""
-        with open(filename, "rb") as f:
-            return pickle.load(f)
-
-    def copy(self) -> IO:
-        """Return a deep copy."""
-        return deepcopy(self)
-
-
-@dataclass(kw_only=True)
-class Image(IO):
+class Image:
     """Image data plus extracted catalog and processing state."""
 
     path: Path | str
@@ -415,3 +395,21 @@ class Image(IO):
             step="transform_to",
         )
         return self
+
+
+    def dump(self, filename: str | None = None) -> None:
+        """Serialize the image object to a pickle file."""
+        if not filename:
+            filename = self.path.stem + ".pkl"
+        with open(filename, "wb") as f:
+            pickle.dump(self, f)
+
+    @staticmethod
+    def load(filename: str) -> Image:
+        """Load a pickled image object."""
+        with open(filename, "rb") as f:
+            return pickle.load(f)
+
+    def copy(self) -> Image:
+        """Return a deep copy."""
+        return deepcopy(self)

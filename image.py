@@ -57,7 +57,7 @@ def _step(*, error_flag: int | None = None):
             except Exception as exc:
                 if error_flag is not None:
                     self.flag = error_flag
-                self._append_note("error", str(exc), step=method.__name__)
+                self.append_note(method.__name__, str(exc), error=True)
                 raise
 
         return wrapped
@@ -88,19 +88,16 @@ class Image:
     def from_fits(self) -> Image:
         """Load data/header/stat from the FITS file path."""
         self.data, self.header, self.stat = load_fits_image(self.path)
-        self._append_note(
-            "ok",
+        self.append_note(
+            "from_fits",
             f"path={self.path.name} shape={self.data.shape} gain={self.stat.gain:.3f} rdnoise={self.stat.rdnoise:.3f}",
-            step="from_fits",
         )
         return self
 
-    def _append_note(
-        self, level: Literal["ok", "error"], detail: str, *, step: str
-    ) -> None:
+    def append_note(self, step: str, detail: str, *, error: bool = False) -> None:
         """Append a timestamped status message to ``note``."""
         detail = detail.replace("\n", " ").strip()
-        status = "OK" if level == "ok" else "ERROR"
+        status = "ERROR" if error else "OK"
         ts = (
             datetime.now(timezone.utc)
             .isoformat(timespec="seconds")
@@ -108,11 +105,6 @@ class Image:
         )
         entry = f"[{ts}] [{status}] {step} | {detail}"
         self.note = entry if not self.note else f"{self.note}\n{entry}"
-
-    def _fail_step(self, step: str, detail: str, *, error_flag: int) -> None:
-        """Record a non-raising pipeline failure and set the image flag."""
-        self.flag = error_flag
-        self._append_note("error", detail, step=step)
 
     def __repr__(self) -> str:
         shape = None if self.data is None else tuple(self.data.shape)
@@ -143,7 +135,7 @@ class Image:
             objlim=5.0,
         )
         self.data = cleaned.data
-        self._append_note("ok", "lacosmic completed", step="remove_cosmic_rays")
+        self.append_note("remove_cosmic_rays", "lacosmic completed")
         return self
 
     @_step(error_flag=DETECT_ERROR)
@@ -169,13 +161,13 @@ class Image:
         self.stat.background2d = bkg2d
 
         if self.catalog.nstars == 0:
-            self._fail_step("detect_star", "no stars detected", error_flag=DETECT_ERROR)
+            self.flag = DETECT_ERROR
+            self.append_note("detect_star", "no stars detected", error=True)
             return self
 
-        self._append_note(
-            "ok",
+        self.append_note(
+            "detect_star",
             f"detected={self.catalog.nstars} std={detect_std:.4f}",
-            step="detect_star",
         )
         return self
 
@@ -195,9 +187,7 @@ class Image:
                 self.catalog.y[ind],
                 half_size=half_size,
             )
-        self._append_note(
-            "ok", f"fwhm={self.stat.fwhm:.3f} n={used}", step="estimate_fwhm"
-        )
+        self.append_note("estimate_fwhm", f"fwhm={self.stat.fwhm:.3f} n={used}")
         return self
 
     def sort_by(self: Image, kwd: str | List[str] = "mag") -> Image:
@@ -251,15 +241,14 @@ class Image:
         )
 
         if catalog is None:
-            self._fail_step(
-                "run_dophot", "empty or invalid DoPHOT output", error_flag=DOPHOT_ERROR
-            )
+            self.flag = DOPHOT_ERROR
+            self.append_note("run_dophot", "empty or invalid DoPHOT output", error=True)
             return self
 
         self.catalog = catalog
         self.stat.background = out_background
         self.stat.fwhm = out_fwhm
-        self._append_note("ok", f"detected={self.catalog.nstars}", step="run_dophot")
+        self.append_note("run_dophot", f"detected={self.catalog.nstars}")
         return self
 
     @_step()
@@ -279,9 +268,7 @@ class Image:
         if inspect:
             plot_epsf_cutouts(stars)
 
-        self._append_note(
-            "ok", f"stars_used={stars_used} oversample={oversample}", step="build_epsf"
-        )
+        self.append_note("build_epsf", f"stars_used={stars_used} oversample={oversample}")
         return self
 
     @_step()
@@ -328,7 +315,7 @@ class Image:
             plt.tight_layout()
             plt.show()
 
-        self._append_note("ok", f"fitted={self.catalog.nstars}", step="epsfphot")
+        self.append_note("epsfphot", f"fitted={self.catalog.nstars}")
         return self
 
     @_step(error_flag=APPHOT_ERROR)
@@ -353,14 +340,11 @@ class Image:
         )
 
         if self.nstars == 0:
-            self._fail_step(
-                "apphot",
-                "no valid stars after aperture photometry",
-                error_flag=APPHOT_ERROR,
-            )
+            self.flag = APPHOT_ERROR
+            self.append_note("apphot", "no valid stars after aperture photometry", error=True)
             return self
 
-        self._append_note("ok", f"kept={self.catalog.nstars}", step="apphot")
+        self.append_note("apphot", f"kept={self.catalog.nstars}")
         return self
 
     @_step(error_flag=MATCH_ERROR)
@@ -382,17 +366,17 @@ class Image:
                 select=select,
             )
         except ValueError as exc:
-            self._fail_step("transform_to", str(exc), error_flag=MATCH_ERROR)
+            self.flag = MATCH_ERROR
+            self.append_note("transform_to", str(exc), error=True)
             return self
 
         if inspect:
             plot_transform_diagnostics(self.catalog, img.catalog, sol)
 
         self.catalog = apply_solution(self.catalog, sol)
-        self._append_note(
-            "ok",
+        self.append_note(
+            "transform_to",
             f"matched={len(sol.id2)} used={sol.n_used} std={sol.std:.4f}",
-            step="transform_to",
         )
         return self
 

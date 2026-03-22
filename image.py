@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Tuple, List
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -17,13 +17,12 @@ from astropy.io import fits
 from astropy.nddata import CCDData
 from astropy.utils.exceptions import AstropyUserWarning
 from ccdproc import cosmicray_lacosmic
-from matplotlib.axes import Axes
 from numpy.typing import NDArray
 
 from .catalog import Catalog
 from .detection import detect_star_catalog
 from .fwhm import estimate_fwhm as estimate_stellar_fwhm
-from .image_io import ImageStat, load_fits_image
+from .io import ImageStat, load_fits_image
 from .matching import (
     apply_solution,
     plot_transform_diagnostics,
@@ -67,7 +66,27 @@ def _step(*, error_flag: int | None = None):
 
 
 @dataclass(kw_only=True)
-class Image:
+class IO:
+    def dump(self, filename: str | None = None) -> None:
+        """Serialize the image object to a pickle file."""
+        if not filename:
+            filename = self.path.stem + ".pkl"
+        with open(filename, "wb") as f:
+            pickle.dump(self, f)
+
+    @staticmethod
+    def load(filename: str) -> IO:
+        """Load a pickled image object."""
+        with open(filename, "rb") as f:
+            return pickle.load(f)
+
+    def copy(self) -> IO:
+        """Return a deep copy."""
+        return deepcopy(self)
+
+
+@dataclass(kw_only=True)
+class Image(IO):
     """Image data plus extracted catalog and processing state."""
 
     path: Path | str
@@ -84,6 +103,17 @@ class Image:
         self.path = Path(self.path).expanduser()
         if self.data is None or self.header is None:
             self.from_fits()
+
+    @_step(error_flag=IO_ERROR)
+    def from_fits(self) -> Image:
+        """Load data/header/stat from the FITS file path."""
+        self.data, self.header, self.stat = load_fits_image(self.path)
+        self._append_note(
+            "ok",
+            f"path={self.path.name} shape={self.data.shape} gain={self.stat.gain:.3f} rdnoise={self.stat.rdnoise:.3f}",
+            step="from_fits",
+        )
+        return self
 
     def _append_note(
         self, level: Literal["ok", "error"], detail: str, *, step: str
@@ -111,16 +141,6 @@ class Image:
             f"nstars={self.catalog.nstars}, fwhm={self.stat.fwhm:.2f}, background={self.stat.background:.2f})"
         )
 
-    @_step(error_flag=IO_ERROR)
-    def from_fits(self) -> Image:
-        """Load data/header/stat from the FITS file path."""
-        self.data, self.header, self.stat = load_fits_image(self.path)
-        self._append_note(
-            "ok",
-            f"path={self.path.name} shape={self.data.shape} gain={self.stat.gain:.3f} rdnoise={self.stat.rdnoise:.3f}",
-            step="from_fits",
-        )
-        return self
 
     def clear(self) -> Image:
         """Clear derived catalog/stat fields while keeping image/header loaded."""
@@ -200,17 +220,17 @@ class Image:
         )
         return self
 
-    def sort_by(self: Image, kwd: str | list[str] = "mag") -> Image:
+    def sort_by(self: Image, kwd: str | List[str] = "mag") -> Image:
         """Sort catalog rows by one or more keys."""
         self.catalog.sort_inplace(kwd)
         return self
 
     def show(
         self,
-        ax: Axes | None = None,
-        percentile: tuple[float, float] = (1, 99),
+        ax: plt.Axes | None = None,
+        percentile: Tuple[float, float] = (1, 99),
         cmap: str = "gray",
-    ) -> tuple[plt.Figure | plt.SubFigure, plt.Axes]:
+    ) -> Tuple[plt.Figure | plt.SubFigure, plt.Axes]:
         """Plot image data with current catalog positions overlaid."""
         if ax is None:
             fig, ax = plt.subplots(figsize=(6, 6))
@@ -369,7 +389,7 @@ class Image:
         img: Image,
         flip: bool = False,
         inspect: bool = False,
-        superflat_order: tuple[int, int] = (0, 0),
+        superflat_order: Tuple[int, int] = (0, 0),
         select: Callable = lambda _: _ > -np.inf,
     ) -> Image:
         """Align this image catalog to a reference image catalog."""
@@ -395,20 +415,3 @@ class Image:
             step="transform_to",
         )
         return self
-
-    def dump(self, filename: str | None = None) -> None:
-        """Serialize the image object to a pickle file."""
-        if not filename:
-            filename = self.path.stem + ".pkl"
-        with open(filename, "wb") as f:
-            pickle.dump(self, f)
-
-    @staticmethod
-    def load(filename: str) -> Image:
-        """Load a pickled image object."""
-        with open(filename, "rb") as f:
-            return pickle.load(f)
-
-    def copy(self) -> Image:
-        """Return a deep copy."""
-        return deepcopy(self)

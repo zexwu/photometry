@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable, Literal, Tuple, List
+from typing import Any, Callable, Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -31,6 +31,7 @@ from .matching import (
 from .photometry import (
     build_epsf_model,
     plot_epsf_cutouts,
+    plot_epsf_photometry_diagnostics,
     run_aperture_photometry,
     run_dophot_catalog,
     run_epsf_photometry,
@@ -113,7 +114,6 @@ class Image:
             f"nstars={self.catalog.nstars}, fwhm={self.stat.fwhm:.2f}, background={self.stat.background:.2f})"
         )
 
-
     def clear(self) -> Image:
         """Clear derived catalog/stat fields while keeping image/header loaded."""
         self.catalog.clear()
@@ -180,17 +180,17 @@ class Image:
     ) -> Image:
         """Estimate frame FWHM from bright detected stars."""
         ind = np.argsort(self.catalog.mag)[:max_stars]
-        used = int(len(ind))
+        used = len(ind)
         self.stat.fwhm = estimate_stellar_fwhm(
-                self.data,
-                self.catalog.x[ind],
-                self.catalog.y[ind],
-                half_size=half_size,
-            )
+            self.data,
+            self.catalog.x[ind],
+            self.catalog.y[ind],
+            half_size=half_size,
+        )
         self.append_note("estimate_fwhm", f"fwhm={self.stat.fwhm:.3f} n={used}")
         return self
 
-    def sort_by(self: Image, kwd: str | List[str] = "mag") -> Image:
+    def sort_by(self: Image, kwd: str | list[str] = "mag") -> Image:
         """Sort catalog rows by one or more keys."""
         self.catalog.sort_inplace(kwd)
         return self
@@ -198,9 +198,9 @@ class Image:
     def show(
         self,
         ax: plt.Axes | None = None,
-        percentile: Tuple[float, float] = (1, 99),
+        percentile: tuple[float, float] = (1, 99),
         cmap: str = "gray",
-    ) -> Tuple[plt.Figure | plt.SubFigure, plt.Axes]:
+    ) -> tuple[plt.Figure | plt.SubFigure, plt.Axes]:
         """Plot image data with current catalog positions overlaid."""
         if ax is None:
             fig, ax = plt.subplots(figsize=(6, 6))
@@ -282,38 +282,12 @@ class Image:
         )
 
         if inspect:
-            model_image = phot.make_model_image(self.data.shape)
-            residual_image = phot.make_residual_image(self.data)
-            fig, axes = plt.subplots(1, 4, figsize=(18, 4))
-
-            norm0 = plt.matplotlib.colors.Normalize(
-                *np.nanpercentile(self.data, [1, 99])
+            plot_epsf_photometry_diagnostics(
+                self.data,
+                self.catalog,
+                epsf=self.epsf,
+                phot=phot,
             )
-            axes[0].imshow(self.data, origin="lower", norm=norm0, cmap="viridis")
-            axes[0].scatter(
-                self.catalog.x,
-                self.catalog.y,
-                ec="red",
-                fc="none",
-                lw=0.7,
-                s=25,
-            )
-            axes[0].set_title("Original image")
-
-            axes[1].imshow(self.epsf.data, origin="lower", cmap="viridis")
-            axes[1].set_title("ePSF image")
-
-            axes[2].imshow(model_image, origin="lower", cmap="viridis")
-            axes[2].set_title("Model image")
-
-            axes[3].imshow(residual_image, origin="lower", cmap="viridis")
-            axes[3].set_title("Residual image")
-
-            for ax in axes:
-                ax.set_xlabel("x")
-                ax.set_ylabel("y")
-            plt.tight_layout()
-            plt.show()
 
         self.append_note("epsfphot", f"fitted={self.catalog.nstars}")
         return self
@@ -339,9 +313,13 @@ class Image:
             auto_scale=auto_scale,
         )
 
-        if self.nstars == 0:
+        if self.catalog.nstars == 0:
             self.flag = APPHOT_ERROR
-            self.append_note("apphot", "no valid stars after aperture photometry", error=True)
+            self.append_note(
+                "apphot",
+                "no valid stars after aperture photometry",
+                error=True,
+            )
             return self
 
         self.append_note("apphot", f"kept={self.catalog.nstars}")
@@ -353,7 +331,7 @@ class Image:
         img: Image,
         flip: bool = False,
         inspect: bool = False,
-        superflat_order: Tuple[int, int] = (0, 0),
+        superflat_order: tuple[int, int] = (0, 0),
         select: Callable = lambda _: _ > -np.inf,
     ) -> Image:
         """Align this image catalog to a reference image catalog."""
@@ -379,7 +357,6 @@ class Image:
             f"matched={len(sol.id2)} used={sol.n_used} std={sol.std:.4f}",
         )
         return self
-
 
     def dump(self, filename: str | None = None) -> None:
         """Serialize the image object to a pickle file."""

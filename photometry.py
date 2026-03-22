@@ -8,6 +8,7 @@ from time import sleep
 from typing import Literal
 
 import numpy as np
+from numpy.typing import NDArray
 import matplotlib.pyplot as plt
 from astropy.nddata import NDData
 from astropy.stats import SigmaClip
@@ -25,11 +26,11 @@ from scipy.spatial import cKDTree
 
 from .catalog import Catalog
 from .detection import flux_err_to_mag_err, flux_to_mag
-from .image_io import ImageStat
+from .io import ImageStat
 
 
 def build_epsf_model(
-    data: np.ndarray,
+    data: NDArray,
     catalog: Catalog,
     *,
     oversample: int,
@@ -89,8 +90,48 @@ def plot_epsf_cutouts(stars: object) -> None:
     plt.show()
 
 
+def plot_epsf_photometry_diagnostics(
+    data: NDArray,
+    catalog: Catalog,
+    *,
+    epsf: object,
+    phot: PSFPhotometry,
+) -> None:
+    """Display the fitted sources, ePSF model, model image, and residual image."""
+    model_image = phot.make_model_image(data.shape)
+    residual_image = phot.make_residual_image(data)
+    fig, axes = plt.subplots(1, 4, figsize=(18, 4))
+
+    norm = plt.matplotlib.colors.Normalize(*np.nanpercentile(data, [1, 99]))
+    axes[0].imshow(data, origin="lower", norm=norm, cmap="viridis")
+    axes[0].scatter(
+        catalog.x,
+        catalog.y,
+        ec="red",
+        fc="none",
+        lw=0.7,
+        s=25,
+    )
+    axes[0].set_title("Original image")
+
+    axes[1].imshow(epsf.data, origin="lower", cmap="viridis")
+    axes[1].set_title("ePSF image")
+
+    axes[2].imshow(model_image, origin="lower", cmap="viridis")
+    axes[2].set_title("Model image")
+
+    axes[3].imshow(residual_image, origin="lower", cmap="viridis")
+    axes[3].set_title("Residual image")
+
+    for ax in axes:
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+    fig.tight_layout()
+    plt.show()
+
+
 def run_epsf_photometry(
-    data: np.ndarray,
+    data: NDArray,
     catalog: Catalog,
     *,
     epsf: object,
@@ -253,7 +294,7 @@ def run_dophot_catalog(
 
 
 def run_aperture_photometry(
-    data: np.ndarray,
+    data: NDArray,
     catalog: Catalog,
     *,
     stat: ImageStat,

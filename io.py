@@ -21,7 +21,7 @@ class ImageStat:
     background2d: NDArray | None = None
 
 
-def load_fits_image(path: Path) -> tuple[np.ndarray, fits.Header, ImageStat]:
+def load_fits_image(path: Path) -> tuple[NDArray, fits.Header, ImageStat]:
     """Load image pixels/header and derive initial ``ImageStat`` values."""
     with fits.open(path, memmap=False) as hdul:
         primary = hdul[0]

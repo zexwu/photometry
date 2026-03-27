@@ -40,12 +40,13 @@ def _local_background(cut: NDArray[np.floating]) -> float:
     return float(np.median(border))
 
 
-def estimate_fwhm(
+def estimate_stellar_fwhm(
     data: NDArray[np.floating],
     x: NDArray[np.floating],
     y: NDArray[np.floating],
     fwhm_init: float = 3.0,
     *,
+    mask: NDArray[np.bool_] | None = None,
     half_size: int = 7,
     maxiters: int = 100,
     fwhm_min: float = 0.5,
@@ -80,11 +81,15 @@ def estimate_fwhm(
     data = np.asarray(data, dtype=float, order="C")
     if data.ndim != 2:
         raise ValueError("data must be a 2D array")
+    if mask is None:
+        mask = np.zeros_like(data, dtype=bool)
+    else:
+        mask = np.asarray(mask, dtype=bool)
     if half_size <= 0:
         raise ValueError("size must be a positive integer")
 
     # Global background (used if local background disabled)
-    _, median, _ = sigma_clipped_stats(data, sigma=3.0)
+    _, median, _ = sigma_clipped_stats(data, sigma=3.0, mask=mask)
 
     fwhm_values: list[float] = []
 
@@ -108,7 +113,10 @@ def estimate_fwhm(
         cut = data[
             yi - half_size : yi + half_size + 1, xi - half_size : xi + half_size + 1
         ]
-        if cut.shape != (n, n) or not np.isfinite(cut).all():
+        cut_mask = mask[
+            yi - half_size : yi + half_size + 1, xi - half_size : xi + half_size + 1
+        ]
+        if cut.shape != (n, n) or not np.isfinite(cut).all() or np.any(cut_mask):
             continue
 
         # Local or global background subtraction
@@ -196,18 +204,18 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     from astropy.io import fits
+    from photutils.detection import DAOStarFinder
 
     with fits.open(args.path, memmap=True) as hdul:
         data = np.asarray(hdul[0].data, dtype=float)
 
     _, median, std = sigma_clipped_stats(data, sigma=3.0)
-    from photutils.detection import DAOStarFinder
 
     finder = DAOStarFinder(fwhm=args.fwhm_init, threshold=args.sigma_threshold * std)
     sources = finder(data - median)
 
     t0 = time.time()
-    fwhm = estimate_fwhm(
+    fwhm = estimate_stellar_fwhm(
         data,
         sources["xcentroid"],
         sources["ycentroid"],

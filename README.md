@@ -12,15 +12,14 @@ These two files can be used independently of the pipeline.
 ## Pipeline modules
 
 - `image.py`: high-level `Image` workflow orchestration.
-- `image_io.py`: FITS loading and `ImageStat` container.
+- `io.py`: FITS loading/saving and `ImageStat` container.
 - `detection.py`: source detection and flux-to-magnitude helpers.
 - `photometry.py`: aperture/ePSF/DoPHOT-related photometry helpers.
-- `matching.py`: catalog alignment logic and diagnostics plotting.
-- `catalog.py`: in-memory `Catalog` dataclass.
+- `catalog.py`: catalog container, alignment logic, and diagnostics plotting.
 
 ## Showcase
 
-Minimal usage with aperture photometry (`apphot`) and catalog alignment:
+Minimal usage with aperture photometry and catalog alignment:
 
 ```python
 from photometry.image import Image
@@ -28,10 +27,10 @@ import numpy as np
 
 ref = (
     Image(path="./ref/ref_frame.fits")
-    .detect_star()
+    .detect_sources()
     .estimate_fwhm()
     .sort_by("mag")
-    .apphot()
+    .run_aperture_photometry()
 )
 
 ref.show(percentile=(1, 99))
@@ -40,10 +39,10 @@ plt.show()
 
 img = (
     Image(path="./sci/sci_frame.fits")
-    .detect_star()
+    .detect_sources()
     .estimate_fwhm()
     .sort_by("mag")
-    .apphot()
+    .run_aperture_photometry()
 )
 
 # geometric transformation estimation and image transformation

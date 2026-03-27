@@ -31,42 +31,124 @@ from typing import Optional, Tuple
 import numpy as np
 from numpy.typing import NDArray
 from scipy.spatial import Delaunay, cKDTree
+from scipy.ndimage import map_coordinates
 
 
 @dataclass(frozen=True)
 class Transformation:
-    """2D geometric transformation (uniform scale + rotation + translation).
+    """2D similarity transform between input and reference image coordinates.
 
-    The transform maps a point ``x`` in the reference frame to the input frame
-    as ``x' = A @ x + t`` where ``A = s * R`` is a scaled rotation (uniform
-    scale, no shear) and ``t`` is a translation.
+    This transform maps input-frame coordinates to reference-frame coordinates:
+
+        x_ref = A @ x_in + t
+
+    where A = s R is a uniform scale times a rotation, and t is a translation.
+
+    Notes
+    -----
+    - Point coordinates are always treated as (x, y).
+    - Image arrays are indexed as (row, col) = (y, x).
+    - `apply()` maps input points to the reference frame.
+    - `warp_image()` resamples an input-frame image onto the reference grid.
     """
 
-    A: NDArray  # shape (2,2)
+    A: NDArray  # shape (2, 2)
     t: NDArray  # shape (2,)
 
     @property
     def scale(self) -> float:
-        c0 = float(np.linalg.norm(self.A[:, 0]))
-        c1 = float(np.linalg.norm(self.A[:, 1]))
-        return 0.5 * (c0 + c1)
+        """Uniform scale factor."""
+        return float(0.5 * (
+            np.linalg.norm(self.A[:, 0]) +
+            np.linalg.norm(self.A[:, 1])
+        ))
 
     @property
     def rotation(self) -> float:
-        s = max(np.linalg.norm(self.A[:, 0]), np.linalg.norm(self.A[:, 1]))
-        if s <= 0:
+        """Rotation angle in radians."""
+        s = self.scale
+        if s == 0:
             return 0.0
         R = self.A / s
-        return np.atan2(float(R[1, 0]), float(R[0, 0]))
-
-    def to_matrix3x3(self) -> NDArray:
-        M = np.eye(3, dtype=float)
-        M[:2, :2] = self.A
-        M[:2, 2] = self.t
-        return M
+        return float(np.atan2(R[1, 0], R[0, 0]))
 
     def apply(self, xy: NDArray) -> NDArray:
-        return (xy @ self.A.T) + self.t
+        """Map input-frame points to reference-frame points.
+
+        Parameters
+        ----------
+        xy
+            Array of shape (..., 2) with points in (x, y) order.
+
+        Returns
+        -------
+        NDArray
+            Points of the same shape in the reference frame.
+        """
+        xy = np.asarray(xy, dtype=float)
+        return xy @ self.A.T + self.t
+
+    def inverse(self) -> Transformation:
+        """Return the inverse transform mapping reference -> input."""
+        A_inv = np.linalg.inv(self.A)
+        return Transformation(A=A_inv, t=-(A_inv @ self.t))
+
+    def warp_image(
+        self,
+        image: NDArray,
+        output_shape: tuple[int, int] | None = None,
+        order: int = 1,
+        cval: float = 0.0,
+    ) -> NDArray:
+        """Resample an input-frame image onto the reference-frame grid.
+
+        Parameters
+        ----------
+        image
+            Input image, shape (H, W) or (H, W, C).
+        output_shape
+            Output reference-frame shape as (H_ref, W_ref).
+            Defaults to `image.shape[:2]`.
+        order
+            Interpolation order for `scipy.ndimage.map_coordinates`.
+            0 = nearest, 1 = bilinear, 3 = cubic.
+        cval
+            Fill value outside the input image.
+
+        Returns
+        -------
+        NDArray
+            Warped image on the reference grid.
+        """
+        if output_shape is None:
+            output_shape = image.shape[:2]
+
+        h_ref, w_ref = output_shape
+
+        # Build reference-frame pixel grid in (x, y) coordinates.
+        y_ref, x_ref = np.indices((h_ref, w_ref), dtype=float)
+        xy_ref = np.column_stack([x_ref.ravel(), y_ref.ravel()])
+
+        # Resampling needs reference -> input coordinates.
+        T_inv = self.inverse()
+        x_in, y_in = T_inv.apply(xy_ref).T
+
+        def warp_channel(channel: NDArray) -> NDArray:
+            values = map_coordinates(
+                channel,
+                [y_in, x_in],   # image indexing uses (row, col) = (y, x)
+                order=order,
+                mode="constant",
+                cval=cval,
+            )
+            return values.reshape(h_ref, w_ref)
+
+        if image.ndim == 2:
+            return warp_channel(image)
+        if image.ndim == 3:
+            return np.stack([warp_channel(image[..., c]) for c in range(image.shape[2])], axis=-1)
+
+        raise ValueError("image must have shape (H, W) or (H, W, C)")
 
 
 @dataclass

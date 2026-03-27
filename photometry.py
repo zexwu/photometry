@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from time import sleep
 from typing import Literal
 
-import numpy as np
-from numpy.typing import NDArray
 import matplotlib.pyplot as plt
+import numpy as np
+from astropy.io import fits
 from astropy.nddata import NDData
 from astropy.stats import SigmaClip
 from astropy.table import Table
 from astropy.visualization import simple_norm
+from numpy.typing import NDArray
 from photutils.aperture import (
     ApertureStats,
     CircularAnnulus,
@@ -35,6 +35,7 @@ def build_epsf_model(
     *,
     oversample: int,
     max_stars: int,
+    mask: NDArray[np.bool_] | None = None,
 ) -> tuple[object, object, int]:
     """Build an ePSF model and return ``(epsf, stars, stars_used)``."""
     ny, nx = data.shape
@@ -51,12 +52,31 @@ def build_epsf_model(
     nn_dist = dists[:, 1]
     good &= nn_dist >= cutout_size
 
+    if mask is not None:
+        mask = np.asarray(mask, dtype=bool)
+        xi = np.rint(x).astype(int)
+        yi = np.rint(y).astype(int)
+        local_masked = np.zeros_like(good)
+        for i, (xc, yc) in enumerate(zip(xi, yi)):
+            if not good[i]:
+                continue
+            cut = mask[
+                yc - half : yc + half + 1,
+                xc - half : xc + half + 1,
+            ]
+            local_masked[i] = np.any(cut)
+        good &= ~local_masked
+
     idx = np.argsort(catalog.mag)[good][:max_stars]
     stars_tbl = Table()
     stars_tbl["x"] = catalog.x[idx]
     stars_tbl["y"] = catalog.y[idx]
 
-    stars = extract_stars(NDData(data=data), stars_tbl, size=(cutout_size, cutout_size))
+    stars = extract_stars(
+        NDData(data=data, mask=mask),
+        stars_tbl,
+        size=(cutout_size, cutout_size),
+    )
     epsf, _ = EPSFBuilder(
         oversampling=oversample,
         maxiters=50,
@@ -136,6 +156,7 @@ def run_epsf_photometry(
     *,
     epsf: object,
     cutout_size: int,
+    mask: NDArray[np.bool_] | None = None,
 ) -> tuple[Catalog, PSFPhotometry, Table | None]:
     """Run ePSF fitting and return fitted catalog and photometry outputs."""
     init_params = Table()
@@ -148,7 +169,7 @@ def run_epsf_photometry(
         localbkg_estimator=LocalBackground(inner_radius=10, outer_radius=15),
         aperture_radius=3.0,
     )
-    result = phot(data, init_params=init_params)
+    result = phot(data, init_params=init_params, mask=mask)
 
     flux_fit, flux_err = result["flux_fit"], result["flux_err"]
     fitted_catalog = Catalog.from_arrays(
@@ -163,6 +184,8 @@ def run_epsf_photometry(
 def _dophot_par_text(
     *,
     version: Literal["C", "fortran"],
+    thresh_min: float = 100.0,
+    thresh_max: float = 65000.0,
     default_par: Path,
     image_name: str,
     obj_name: str,
@@ -181,7 +204,7 @@ OBJECTS_OUT     = '{obj_name}'
 ERRORS_OUT      = ' '
 SHADOWFILE_OUT  = ' '
 OBJECTS_IN      = ' '
-IMAGE_OUT       = ' '
+IMAGE_OUT       = '{image_name.replace('.fits', '_out.fits')}'
 PSFTYPE         = 'PGAUSS'
 SKYTYPE         = 'PLANE'
 OBJTYPE_IN      = 'COMPLETE'
@@ -190,12 +213,10 @@ FWHM            = {stat.fwhm:.2f}
 SKY             = {stat.background:.2f}
 EPERDN          = {stat.gain}
 RDNOISE         = {stat.rdnoise}
-ITOP            = 40000
+CTPERSAT        = {thresh_max}
+THRESHMAX       = {thresh_max}
+THRESHMIN       = {thresh_min}
 ICRIT           = 10
-CENTINTMAX      = 30000
-CTPERSAT        = 40000
-THRESHMAX       = 40000
-THRESHMIN       = 200
 APBOX_X         = 16
 APBOX_Y         = 16
 NFITBOX_X       = 12
@@ -206,27 +227,30 @@ END"""
 AUTOTHRESH      = 'NO'
 FINISHFILE      = ' '
 IMAGE_IN        = {image_name}
-IMAGE_OUT       = {image_name.replace('.fits', '_out.fits')}
+IMAGE_OUT       = '{image_name.replace('.fits', '_out.fits')}'
 OBJECTS_OUT     = {obj_name}
 PARAMS_OUT      = ' '
 PARAMS_DEFAULT  = {default_par}
 PSFTYPE         = 'PGAUSS'
 OBJTYPE_IN      = 'COMPLETE'
 OBJTYPE_OUT     = 'COMPLETE'
-THRESHMIN       = 100.0
-THRESHMAX       = 40000.0
+THRESHMIN       = {thresh_min}
+THRESHMAX       = {thresh_max}
 EPERDN          = {stat.gain}
 RDNOISE         = {stat.rdnoise}
 FWHM            = {stat.fwhm:.2f}
 SKY             = {stat.background:.2f}
-TOP             = 40000.0
+TOP             = 120000.0
 END"""
 
 
 def run_dophot_catalog(
     *,
     path: Path,
+    data: NDArray,
+    header: fits.Header,
     stat: ImageStat,
+    mask: NDArray[np.bool_] | None,
     dophot_bin: Path,
     default_par: Path,
     tmp_dir: Path,
@@ -258,8 +282,17 @@ def run_dophot_catalog(
         encoding="utf-8",
     )
 
-    image_path.unlink(missing_ok=True)
-    image_path.symlink_to(path.resolve())
+    image_data = np.asarray(data, dtype=np.float32)
+    if mask is not None and np.any(mask):
+        image_data = image_data.copy()
+        fill_value = (
+            float(stat.background)
+            if np.isfinite(stat.background)
+            else float(np.nanmedian(image_data[~mask]))
+        )
+        image_data[np.asarray(mask, dtype=bool)] = fill_value
+
+    fits.PrimaryHDU(image_data, header=header).writeto(image_path, overwrite=True)
 
     subprocess.run(
         [str(dophot_bin), par_path.name],
@@ -267,7 +300,6 @@ def run_dophot_catalog(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    sleep(0.5)
 
     if not obj_path.exists() or obj_path.stat().st_size <= 0:
         return None, stat.background, stat.fwhm
@@ -303,6 +335,7 @@ def run_aperture_photometry(
     r_out: float,
     zeropoint: float,
     auto_scale: bool,
+    mask: NDArray[np.bool_] | None = None,
 ) -> Catalog:
     """Run aperture photometry and return a filtered magnitude catalog."""
     if auto_scale:
@@ -321,6 +354,7 @@ def run_aperture_photometry(
     annulus_stats = ApertureStats(
         data,
         annuli,
+        mask=mask,
         sigma_clip=SigmaClip(sigma=3.0, maxiters=10),
     )
 
@@ -328,7 +362,7 @@ def run_aperture_photometry(
     bkg_std_per_pixel = annulus_stats.std
     total_bkg_in_aperture = bkg_per_pixel * apertures.area
 
-    phot_table = aperture_photometry(data, apertures)
+    phot_table = aperture_photometry(data, apertures, mask=mask)
     phot_table["flux_bkg_subtracted"] = (
         phot_table["aperture_sum"] - total_bkg_in_aperture
     )

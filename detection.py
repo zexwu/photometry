@@ -78,14 +78,7 @@ def detect_star_catalog(
     det_data = np.array(det_data, copy=True)
     det_data[mask] = median
 
-    finder = DAOStarFinder(
-        fwhm=finder_fwhm,
-        threshold=threshold_sigma * std,
-        sharplo=0.2,
-        sharphi=1.2,
-        roundlo=-1.0,
-        roundhi=1.0,
-    )
+    finder = DAOStarFinder(fwhm=finder_fwhm, threshold=threshold_sigma * std)
     sources = finder(det_data)
 
     if sources is None or len(sources) == 0:

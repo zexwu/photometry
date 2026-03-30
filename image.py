@@ -16,14 +16,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 from astropy.io import fits
 from astropy.utils.exceptions import AstropyUserWarning
+from astropy.visualization import simple_norm
 from astroscrappy import detect_cosmics
 from numpy.typing import NDArray
 
 from .catalog import (
     Catalog,
-    apply_solution,
+    _apply_calibration_fit,
+    _solve_calibration_fit,
     plot_transform_diagnostics,
-    solve_catalog_transform,
 )
 from .cr import detect_streak_mask
 from .detection import detect_star_catalog
@@ -194,7 +195,9 @@ class Image:
         """Convert the image data from ADU to electrons using ``gain``."""
         if gain is not None:
             self.stat.gain = gain
+
         self.data = self.data.astype(np.float32) * self.stat.gain
+        self.stat.gain = 1.0
         return self
 
     def trim(self, x0: int, y0: int, width: int, height: int) -> Image:
@@ -227,6 +230,7 @@ class Image:
         ax: plt.Axes | None = None,
         percentile: tuple[float, float] = (1, 99),
         cmap: str = "gray",
+        scale: Literal["linear", "sqrt", "log", "asinh"] = "linear",
     ) -> tuple[plt.Figure | plt.SubFigure, plt.Axes]:
         """Plot image data with current catalog positions overlaid."""
         if ax is None:
@@ -238,8 +242,30 @@ class Image:
         if valid.size == 0:
             valid = self.data.ravel()
         vmin, vmax = np.nanpercentile(valid, percentile)
-        display = np.ma.array(self.data, mask=self.mask)
-        ax.imshow(display, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
+        if scale == "linear":
+            ax.imshow(self.data, origin="lower", cmap=cmap, vmin=vmin, vmax=vmax)
+        else:
+            norm = simple_norm(
+                self.data,
+                stretch=scale,
+                min_percent=percentile[0],
+                max_percent=percentile[1],
+            )
+            ax.imshow(self.data, origin="lower", cmap=cmap, norm=norm)
+        if np.any(self.mask):
+            overlay = np.zeros((*self.mask.shape, 4), dtype=float)
+            overlay[self.mask] = (1.0, 0.0, 0.0, 0.25)
+            ax.imshow(overlay, origin="lower")
+
+        def format_coord(x: float, y: float) -> str:
+            xi = int(np.round(x))
+            yi = int(np.round(y))
+            if 0 <= xi < self.data.shape[1] and 0 <= yi < self.data.shape[0]:
+                value = self.data[yi, xi]
+                return f"x={x:.1f}, y={y:.1f}, value={value:.6g}"
+            return f"x={x:.1f}, y={y:.1f}"
+
+        ax.format_coord = format_coord
         ax.scatter(
             self.catalog.x,
             self.catalog.y,
@@ -358,14 +384,22 @@ class Image:
     @_step()
     def build_epsf(
         self,
+        cutout_size: int | None = None,
         oversample: int = 2,
-        max_stars: int = 100,
+        max_stars: int = 25,
         inspect: bool = True,
     ) -> Image:
         """Build an ePSF model from isolated stars."""
+        if cutout_size is None:
+            cutout_size = int(np.ceil(6 * self.stat.fwhm))
+        cutout_size = max(7, int(cutout_size))
+        if cutout_size % 2 == 0:
+            cutout_size += 1
+
         self.epsf, stars, stars_used = build_epsf_model(
             self.data,
             self.catalog,
+            cutout_size=cutout_size,
             oversample=oversample,
             max_stars=max_stars,
             mask=self.mask,
@@ -375,7 +409,7 @@ class Image:
 
         self.append_note(
             "build_epsf",
-            f"stars_used={stars_used} oversample={oversample}",
+            f"stars_used={stars_used} cutout_size={cutout_size} oversample={oversample}",
         )
         return self
 
@@ -400,6 +434,7 @@ class Image:
                 self.catalog,
                 epsf=self.epsf,
                 phot=phot,
+                stat=self.stat,
             )
 
         self.append_note("run_epsf_photometry", f"fitted={len(self.catalog)}")
@@ -451,12 +486,14 @@ class Image:
         """Align this image catalog to a reference image catalog."""
         source_catalog = self.catalog
         try:
-            sol = solve_catalog_transform(
+            fit = _solve_calibration_fit(
                 source_catalog,
                 img.catalog,
                 flip=flip,
                 superflat_order=superflat_order,
                 select=select,
+                ref_color=None,
+                max_mag_err=0.1,
             )
         except ValueError as exc:
             self.flag = ImageFlag.MATCH_ERROR
@@ -464,15 +501,15 @@ class Image:
             return self
 
         if inspect:
-            plot_transform_diagnostics(source_catalog, img.catalog, sol)
+            plot_transform_diagnostics(source_catalog, img.catalog, fit)
 
-        self.catalog = apply_solution(source_catalog, sol)
-        self.data = sol.transform.warp_image(
+        self.catalog = _apply_calibration_fit(source_catalog, fit)
+        self.data = fit.transform.warp_image(
             self.filled_data(),
             output_shape=img.data.shape,
         )
         self.mask = (
-            sol.transform.warp_image(
+            fit.transform.warp_image(
                 self.mask.astype(float),
                 output_shape=img.data.shape,
                 order=0,
@@ -482,7 +519,7 @@ class Image:
         )
         self.append_note(
             "transform_to",
-            f"matched={len(sol.id2)} used={sol.n_used} std={sol.std:.4f}",
+            f"matched={len(fit.id2)} used={fit.n_used} std={fit.std:.4f}",
         )
         return self
 

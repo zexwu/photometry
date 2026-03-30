@@ -33,41 +33,97 @@ def build_epsf_model(
     data: NDArray,
     catalog: Catalog,
     *,
+    cutout_size: int,
     oversample: int,
     max_stars: int,
     mask: NDArray[np.bool_] | None = None,
+    isolation_radius: float | None = None,
+    contamination_fraction: float = 0.25,
 ) -> tuple[object, object, int]:
     """Build an ePSF model and return ``(epsf, stars, stars_used)``."""
+    if cutout_size < 3 or cutout_size % 2 == 0:
+        raise ValueError("cutout_size must be an odd integer >= 3")
+
     ny, nx = data.shape
-    cutout_size = 9
     half = cutout_size // 2
     margin = half + 1
+    isolation_radius = (
+        1 * cutout_size if isolation_radius is None else float(isolation_radius)
+    )
 
     x = np.asarray(catalog.x, dtype=float)
     y = np.asarray(catalog.y, dtype=float)
-    good = (x >= margin) & (x < nx - margin) & (y >= margin) & (y < ny - margin)
+    base_good = (x >= margin) & (x < nx - margin) & (y >= margin) & (y < ny - margin)
+    nn_dist = np.full(len(catalog), np.inf, dtype=float)
 
-    coords = np.c_[x, y]
-    dists, _ = cKDTree(coords).query(coords, k=2)
-    nn_dist = dists[:, 1]
-    good &= nn_dist >= cutout_size
+    if len(catalog) > 1:
+        coords = np.c_[x, y]
+        dists, _ = cKDTree(coords).query(coords, k=2)
+        nn_dist = dists[:, 1]
 
     if mask is not None:
         mask = np.asarray(mask, dtype=bool)
-        xi = np.rint(x).astype(int)
-        yi = np.rint(y).astype(int)
-        local_masked = np.zeros_like(good)
-        for i, (xc, yc) in enumerate(zip(xi, yi)):
-            if not good[i]:
-                continue
-            cut = mask[
+
+    xi = np.rint(x).astype(int)
+    yi = np.rint(y).astype(int)
+    contamination_ratio = np.full(len(catalog), np.inf, dtype=float)
+    snr = np.zeros(len(catalog), dtype=float)
+    for i, (xc, yc) in enumerate(zip(xi, yi)):
+        if not base_good[i]:
+            continue
+
+        cut = data[
+            yc - half : yc + half + 1,
+            xc - half : xc + half + 1,
+        ]
+        if cut.shape != (cutout_size, cutout_size) or not np.isfinite(cut).all():
+            base_good[i] = False
+            continue
+
+        if mask is not None:
+            cut_mask = mask[
                 yc - half : yc + half + 1,
                 xc - half : xc + half + 1,
             ]
-            local_masked[i] = np.any(cut)
-        good &= ~local_masked
+            if np.any(cut_mask):
+                base_good[i] = False
+                continue
 
-    idx = np.argsort(catalog.mag)[good][:max_stars]
+        border = np.concatenate(
+            [cut[0, :], cut[-1, :], cut[1:-1, 0], cut[1:-1, -1]]
+        )
+        background = np.median(border)
+        noise = np.std(border)
+        cut_sub = cut - background
+        central_peak = np.max(cut_sub[half - 1 : half + 2, half - 1 : half + 2])
+        if not np.isfinite(central_peak) or central_peak <= 0:
+            base_good[i] = False
+            continue
+        snr[i] = central_peak / max(noise, 1.0e-6)
+
+        outer = cut_sub.copy()
+        outer[half - 1 : half + 2, half - 1 : half + 2] = -np.inf
+        contaminant_peak = np.max(outer)
+        contamination_ratio[i] = max(0.0, contaminant_peak) / central_peak
+
+    preferred = base_good.copy()
+    preferred &= nn_dist >= isolation_radius
+    preferred &= contamination_ratio <= contamination_fraction
+
+    rank = np.lexsort((catalog.mag, contamination_ratio, -nn_dist, -snr))
+    preferred_idx = rank[preferred[rank]]
+    base_idx = rank[base_good[rank]]
+
+    if len(preferred_idx) >= 3:
+        idx = preferred_idx[:max_stars]
+    else:
+        idx = base_idx[:max_stars]
+
+    if len(idx) < 3:
+        raise ValueError(
+            f"not enough usable stars for ePSF: selected={len(idx)}"
+        )
+
     stars_tbl = Table()
     stars_tbl["x"] = catalog.x[idx]
     stars_tbl["y"] = catalog.y[idx]
@@ -77,19 +133,28 @@ def build_epsf_model(
         stars_tbl,
         size=(cutout_size, cutout_size),
     )
+    if stars is None or len(stars) < 3:
+        raise ValueError(f"failed to extract enough ePSF stars: extracted={len(stars) if stars is not None else 0}")
+
     epsf, _ = EPSFBuilder(
         oversampling=oversample,
         maxiters=50,
         progress_bar=True,
         smoothing_kernel="quartic",
     )(stars)
+    if epsf is None or getattr(epsf, "data", None) is None:
+        raise ValueError("ePSF builder failed to produce a valid model")
+
     return epsf, stars, int(len(idx))
 
 
 def plot_epsf_cutouts(stars: object) -> None:
     """Display extracted stellar cutouts used for ePSF construction."""
+    if len(stars) == 0:
+        raise ValueError("no ePSF cutouts to display")
+
     ncols = min(5, len(stars))
-    nrows = int(len(stars) / ncols) + 1
+    nrows = int(np.ceil(len(stars) / ncols))
 
     fig, axes = plt.subplots(nrows, ncols, figsize=(ncols, nrows))
     axes = np.atleast_1d(axes).ravel()
@@ -116,13 +181,28 @@ def plot_epsf_photometry_diagnostics(
     *,
     epsf: object,
     phot: PSFPhotometry,
+    stat: ImageStat,
 ) -> None:
     """Display the fitted sources, ePSF model, model image, and residual image."""
     model_image = phot.make_model_image(data.shape)
-    residual_image = phot.make_residual_image(data)
-    fig, axes = plt.subplots(1, 4, figsize=(18, 4))
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    axes = axes.ravel()
 
     norm = plt.matplotlib.colors.Normalize(*np.nanpercentile(data, [1, 99]))
+    if stat.background2d is not None:
+        background = np.asarray(stat.background2d, dtype=float)
+    else:
+        background = np.full_like(data, float(stat.background), dtype=float)
+
+    data_sub = data - background
+    residual_image = data_sub - model_image
+
+    gain = max(float(stat.gain), 1.0e-6)
+    read_noise_var = (float(stat.rdnoise) / gain) ** 2
+    poisson_var = np.clip(model_image + background, 0.0, None) / gain
+    sigma_image = np.sqrt(poisson_var + read_noise_var)
+    residual_sigma = residual_image / np.maximum(sigma_image, 1.0e-6)
+
     axes[0].imshow(data, origin="lower", norm=norm, cmap="viridis")
     axes[0].scatter(
         catalog.x,
@@ -137,11 +217,17 @@ def plot_epsf_photometry_diagnostics(
     axes[1].imshow(epsf.data, origin="lower", cmap="viridis")
     axes[1].set_title("ePSF image")
 
-    axes[2].imshow(model_image, origin="lower", cmap="viridis")
+    axes[2].imshow(model_image, origin="lower", norm=norm, cmap="viridis")
     axes[2].set_title("Model image")
 
-    axes[3].imshow(residual_image, origin="lower", cmap="viridis")
-    axes[3].set_title("Residual image")
+    axes[3].imshow(
+        residual_sigma,
+        origin="lower",
+        vmin=-5.0,
+        vmax=5.0,
+        cmap="coolwarm",
+    )
+    axes[3].set_title("Residual image [sigma]")
 
     for ax in axes:
         ax.set_xlabel("x")
@@ -184,8 +270,8 @@ def run_epsf_photometry(
 def _dophot_par_text(
     *,
     version: Literal["C", "fortran"],
-    thresh_min: float = 100.0,
-    thresh_max: float = 65000.0,
+    thresh_min: float = 2.0e8,
+    thresh_max: float = 2.0e16,
     default_par: Path,
     image_name: str,
     obj_name: str,
@@ -213,14 +299,15 @@ FWHM            = {stat.fwhm:.2f}
 SKY             = {stat.background:.2f}
 EPERDN          = {stat.gain}
 RDNOISE         = {stat.rdnoise}
+CENTINTMAX      = {thresh_max}
 CTPERSAT        = {thresh_max}
+ITOP            = {thresh_max}
 THRESHMAX       = {thresh_max}
 THRESHMIN       = {thresh_min}
-ICRIT           = 10
-APBOX_X         = 16
-APBOX_Y         = 16
-NFITBOX_X       = 12
-NFITBOX_Y       = 12
+APBOX_X         = {int(2.5 * stat.fwhm)}
+APBOX_Y         = {int(2.5 * stat.fwhm)}
+NFITBOX_X       = {int(2. * stat.fwhm)}
+NFITBOX_Y       = {int(2. * stat.fwhm)}
 END"""
 
     return f"""\
@@ -240,7 +327,7 @@ EPERDN          = {stat.gain}
 RDNOISE         = {stat.rdnoise}
 FWHM            = {stat.fwhm:.2f}
 SKY             = {stat.background:.2f}
-TOP             = 120000.0
+TOP             = {thresh_max}
 END"""
 
 
@@ -310,6 +397,7 @@ def run_dophot_catalog(
 
     data = data[(np.abs(data[:, 4]) < 99) & (np.abs(data[:, 5]) < 1)]
     data = data[data[:, 1] == 1]
+
     if len(data) == 0:
         return None, stat.background, stat.fwhm
 

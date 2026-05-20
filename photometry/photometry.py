@@ -142,6 +142,15 @@ class AnalyticalPSFPhotometryResult:
 
 
 @dataclass
+class FixedPSFPhotometryResult:
+    """Outputs from fixed-position PSF photometry."""
+
+    table: Table
+    model_image: NDArray
+    residual_image: NDArray
+
+
+@dataclass
 class _StarCutout:
     """Internal isolated-star cutout bundle."""
 
@@ -1091,7 +1100,11 @@ def run_analytical_psf_photometry(
             ),
         )
 
-    fit_radius = max(4.0, 2.5 * psf.fwhm_major) if fit_radius is None else float(fit_radius)
+    fit_radius = (
+        max(4.0, 2.5 * psf.fwhm_major)
+        if fit_radius is None
+        else float(fit_radius)
+    )
     render_radius = (
         max(8.0, 4.5 * psf.fwhm_major) if render_radius is None else float(render_radius)
     )
@@ -1269,6 +1282,122 @@ def run_analytical_psf_photometry(
         model_image=model_image,
         residual_image=residual_image,
         n_iterations=n_iterations,
+    )
+
+
+def run_fixed_psf_photometry(
+    data: NDArray,
+    catalog: Catalog,
+    *,
+    psf: AnalyticalMoffatPSF,
+    stat: ImageStat,
+    mask: NDArray[np.bool_] | None = None,
+    fit_radius: float | None = None,
+    render_radius: float | None = None,
+    fit_background: bool = True,
+) -> FixedPSFPhotometryResult:
+    """Fit fixed-position PSF fluxes for a source catalog.
+
+    This is intended for difference images, so negative fitted flux is allowed.
+    """
+    data = np.asarray(data, dtype=float)
+    if mask is None:
+        mask = np.zeros_like(data, dtype=bool)
+    else:
+        mask = np.asarray(mask, dtype=bool)
+
+    fit_radius = (
+        max(4.0, 2.5 * psf.fwhm_major)
+        if fit_radius is None
+        else float(fit_radius)
+    )
+    render_radius = (
+        max(8.0, 4.5 * psf.fwhm_major) if render_radius is None else float(render_radius)
+    )
+    half_size = int(np.ceil(fit_radius))
+    gain = max(float(stat.gain), 1.0e-6)
+    read_noise_var = (float(stat.rdnoise) / gain) ** 2
+
+    rows = []
+    x = np.asarray(catalog.x, dtype=float)
+    y = np.asarray(catalog.y, dtype=float)
+    flux = np.full(len(catalog), np.nan, dtype=float)
+    flux_err = np.full(len(catalog), np.nan, dtype=float)
+
+    for i, (xc, yc) in enumerate(zip(x, y)):
+        x0, x1, y0, y1 = _source_patch_bounds(
+            data.shape,
+            x=float(xc),
+            y=float(yc),
+            half_size=half_size,
+        )
+        patch = data[y0:y1, x0:x1]
+        patch_mask = mask[y0:y1, x0:x1]
+        yy, xx = np.mgrid[y0:y1, x0:x1]
+        good = np.isfinite(patch) & (~patch_mask)
+        if int(np.sum(good)) < (2 if fit_background else 1):
+            rows.append((i, xc, yc, np.nan, np.nan, np.nan, np.nan, np.nan, False))
+            continue
+
+        psf_patch = psf.unit_flux_image(xx, yy, float(xc), float(yc))
+        _, noise0 = _cutout_border_stats(patch, patch_mask)
+        sigma = np.sqrt(np.maximum(noise0**2 + read_noise_var, 1.0e-6))
+        yvec = patch[good] / sigma
+        if fit_background:
+            amat = np.column_stack(
+                (
+                    psf_patch[good] / sigma,
+                    np.ones(int(np.sum(good)), dtype=float) / sigma,
+                )
+            )
+        else:
+            amat = (psf_patch[good] / sigma)[:, None]
+
+        try:
+            coeff, _, _, _ = np.linalg.lstsq(amat, yvec, rcond=None)
+            cov = np.linalg.pinv(amat.T @ amat)
+        except np.linalg.LinAlgError:
+            rows.append((i, xc, yc, np.nan, np.nan, np.nan, np.nan, np.nan, False))
+            continue
+
+        model = amat @ coeff
+        dof = max(1, len(yvec) - len(coeff))
+        scale = float(np.sum((yvec - model) ** 2) / dof)
+        err = np.sqrt(np.clip(np.diag(cov) * scale, 0.0, None))
+        flux[i] = float(coeff[0])
+        flux_err[i] = float(err[0]) if len(err) else np.nan
+        background = float(coeff[1]) if fit_background else 0.0
+        rms = float(np.sqrt(scale))
+        snr = flux[i] / flux_err[i] if flux_err[i] > 0 else np.nan
+        rows.append((i, xc, yc, flux[i], flux_err[i], snr, background, rms, True))
+
+    table = Table(
+        rows=rows,
+        names=[
+            "id",
+            "x",
+            "y",
+            "flux_fit",
+            "flux_err",
+            "snr",
+            "background",
+            "residual_rms",
+            "success",
+        ],
+    )
+    model_image = _render_analytical_psf_model(
+        data.shape,
+        psf=psf,
+        x=x,
+        y=y,
+        flux=flux,
+        render_radius=render_radius,
+    )
+    residual_image = data - model_image
+    return FixedPSFPhotometryResult(
+        table=table,
+        model_image=model_image,
+        residual_image=residual_image,
     )
 
 

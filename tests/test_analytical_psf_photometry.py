@@ -3,21 +3,18 @@
 from __future__ import annotations
 
 import os
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 
+os.environ.setdefault("MPLBACKEND", "Agg")
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+
+import matplotlib
 import numpy as np
 from astropy.io import fits
 from scipy.spatial import cKDTree
 import matplotlib.pyplot as plt
 
-os.environ.setdefault("MPLBACKEND", "Agg")
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
-
-PACKAGE_PARENT = Path(__file__).resolve().parents[2]
-if str(PACKAGE_PARENT) not in sys.path:
-    sys.path.insert(0, str(PACKAGE_PARENT))
+matplotlib.use("Agg", force=True)
 
 from photometry.catalog import Catalog
 from photometry.image import Image
@@ -26,6 +23,7 @@ from photometry.photometry import (
     AnalyticalMoffatPSF,
     build_analytical_moffat_psf,
     run_analytical_psf_photometry,
+    run_fixed_psf_photometry,
 )
 
 
@@ -182,3 +180,37 @@ def test_image_workflow_runs_analytical_psf_photometry_on_synthetic_data() -> No
     assert float(np.nanmedian(img.catalog.mag_err)) < 0.03
     assert "build_analytical_psf" in img.note
     assert "run_analytical_psf_photometry" in img.note
+
+
+def test_fixed_psf_photometry_recovers_signed_difference_flux() -> None:
+    """Fixed-position PSF photometry should preserve signed difference flux."""
+    psf = AnalyticalMoffatPSF(
+        alpha_major=1.9,
+        alpha_minor=1.4,
+        beta=3.2,
+        theta=np.deg2rad(23.0),
+    )
+    yy, xx = np.mgrid[:64, :64]
+    x = np.array([25.4, 39.1])
+    y = np.array([31.2, 24.8])
+    flux = np.array([1200.0, -750.0])
+    data = np.zeros((64, 64), dtype=float)
+    for xc, yc, fc in zip(x, y, flux):
+        data += fc * psf.unit_flux_image(xx, yy, xc, yc)
+
+    catalog = Catalog.from_arrays(
+        x=x,
+        y=y,
+        mag=np.zeros_like(x),
+        mag_err=np.ones_like(x) * 0.01,
+    )
+    result = run_fixed_psf_photometry(
+        data,
+        catalog,
+        psf=psf,
+        stat=ImageStat(fwhm=psf.fwhm, gain=1.0, rdnoise=1.0, background=0.0),
+        fit_background=False,
+    )
+
+    assert np.all(result.table["success"])
+    np.testing.assert_allclose(result.table["flux_fit"], flux, rtol=0.03, atol=3.0)

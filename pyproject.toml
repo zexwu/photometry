@@ -23,9 +23,8 @@ dev = [
     "pytest>=8.3",
 ]
 
-[tool.setuptools]
-packages = ["photometry"]
-package-dir = { photometry = "." }
+[tool.setuptools.packages.find]
+include = ["photometry*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

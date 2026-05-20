@@ -30,7 +30,14 @@ from .cr import detect_streak_mask
 from .detection import detect_star_catalog
 from .fwhm import estimate_stellar_fwhm
 from .io import ImageStat, load_fits_image, write_fits_image
+from .image_subtraction import (
+    DEFAULT_GAUSSIANS,
+    DEFAULT_HOTPANTS_BIN,
+    hotpants_subtract,
+    plot_subtraction_diagnostics,
+)
 from .photometry import (
+    FixedPSFPhotometryResult,
     build_epsf_model,
     build_analytical_moffat_psf,
     plot_analytical_psf_photometry_diagnostics,
@@ -40,6 +47,7 @@ from .photometry import (
     run_aperture_photometry,
     run_dophot_catalog,
     run_epsf_photometry,
+    run_fixed_psf_photometry,
 )
 
 warnings.filterwarnings("ignore", category=AstropyUserWarning)
@@ -56,6 +64,7 @@ class ImageFlag(IntEnum):
     DOPHOT_ERROR = 5
     MATCH_ERROR = 6
     PSF_ERROR = 7
+    SUBTRACT_ERROR = 8
 
 
 def _step(*, error_flag: ImageFlag | None = None):
@@ -92,6 +101,8 @@ class Image:
     flag: ImageFlag = ImageFlag.OK
     epsf: Any | None = None
     analytical_psf: Any | None = None
+    subtraction: Any | None = None
+    fixed_psf_result: FixedPSFPhotometryResult | None = None
 
     def __post_init__(self) -> None:
         self.path = Path(self.path).expanduser()
@@ -530,6 +541,157 @@ class Image:
             f"fitted={len(self.catalog)} iterations={result.n_iterations}",
         )
         return self
+
+    @_step(error_flag=ImageFlag.PSF_ERROR)
+    def run_fixed_psf_photometry(
+        self,
+        *,
+        catalog: Catalog | None = None,
+        psf: Any | None = None,
+        fit_radius: float | None = None,
+        render_radius: float | None = None,
+        fit_background: bool = True,
+    ) -> Image:
+        """Fit signed fixed-position PSF fluxes and store the result table."""
+        if catalog is not None:
+            self.catalog = catalog
+        if psf is not None:
+            self.analytical_psf = psf
+        if self.analytical_psf is None:
+            raise ValueError("analytical_psf is required for fixed PSF photometry")
+
+        self.fixed_psf_result = run_fixed_psf_photometry(
+            self.data,
+            self.catalog,
+            psf=self.analytical_psf,
+            stat=self.stat,
+            mask=self.mask,
+            fit_radius=fit_radius,
+            render_radius=render_radius,
+            fit_background=fit_background,
+        )
+        n_success = int(np.sum(self.fixed_psf_result.table["success"]))
+        self.append_note(
+            "run_fixed_psf_photometry",
+            f"fitted={n_success}/{len(self.fixed_psf_result.table)}",
+        )
+        return self
+
+    @_step(error_flag=ImageFlag.SUBTRACT_ERROR)
+    def subtract(
+        self,
+        ref_img: Image,
+        *,
+        gaussian_list: tuple[tuple[int, float], ...] = DEFAULT_GAUSSIANS,
+        hotpants_bin: str | Path = DEFAULT_HOTPANTS_BIN,
+        tmp_dir: str | Path | None = None,
+        convolve: Literal["i", "t"] | None = None,
+        normalize: Literal["t", "i", "u"] = "t",
+        kernel_half_width: int = 10,
+        kernel_order: int = 2,
+        background_order: int = 1,
+        stamp_grid: tuple[int, int] = (10, 10),
+        region_grid: tuple[int, int] = (1, 1),
+        extra_args: tuple[str, ...] = (),
+        build_psf: bool = True,
+        psf_catalog: Catalog | None = None,
+        psf_source: Literal["auto", "science", "convolved"] = "auto",
+        psf_cutout_size: int | None = None,
+        psf_max_stars: int = 25,
+        inspect: bool = False,
+    ) -> Image:
+        """Return ``self - ref_img`` from HOTPANTS.
+
+        The default ``normalize="t"`` keeps the difference image on the
+        reference/template flux scale.
+        """
+        result = hotpants_subtract(
+            self.data,
+            ref_img.data,
+            science_header=self.header,
+            reference_header=ref_img.header,
+            science_mask=self.mask,
+            reference_mask=ref_img.mask,
+            science_stat=self.stat,
+            reference_stat=ref_img.stat,
+            gaussian_list=gaussian_list,
+            hotpants_bin=hotpants_bin,
+            tmp_dir=tmp_dir,
+            convolve=convolve,
+            normalize=normalize,
+            kernel_half_width=kernel_half_width,
+            kernel_order=kernel_order,
+            background_order=background_order,
+            stamp_grid=stamp_grid,
+            region_grid=region_grid,
+            extra_args=extra_args,
+        )
+
+        diff = Image(
+            path=f"{self.path.stem}_minus_{ref_img.path.stem}.fits",
+            data=result.difference,
+            mask=result.mask,
+            header=result.header,
+        )
+        diff.stat = deepcopy(ref_img.stat if normalize == "t" else self.stat)
+        diff.catalog = deepcopy(self.catalog)
+        diff.subtraction = result
+        diff.append_note(
+            "subtract",
+            (
+                f"target={self.path.name} reference={ref_img.path.name} "
+                f"normalize={normalize} convolve={convolve or 'auto'}"
+            ),
+        )
+        if inspect:
+            plot_subtraction_diagnostics(
+                self.data,
+                ref_img.data,
+                result,
+                science_mask=self.mask,
+                reference_mask=ref_img.mask,
+            )
+
+        if build_psf:
+            catalog = psf_catalog or self.catalog
+            source_data = self.data
+            source_mask = self.mask
+            source_stat = self.stat
+            if psf_source == "convolved" or (
+                psf_source == "auto" and convolve == "i" and result.convolved is not None
+            ):
+                if result.convolved is None:
+                    raise ValueError("HOTPANTS did not return a convolved image")
+                source_data = result.convolved
+                source_mask = result.mask
+                source_stat = diff.stat
+
+            cutout_size = psf_cutout_size
+            if cutout_size is None:
+                fwhm = source_stat.fwhm if np.isfinite(source_stat.fwhm) else 3.0
+                cutout_size = int(np.ceil(6 * fwhm))
+            cutout_size = max(7, int(cutout_size))
+            if cutout_size % 2 == 0:
+                cutout_size += 1
+
+            diff.analytical_psf, fit_table, stars_used = build_analytical_moffat_psf(
+                source_data,
+                catalog,
+                stat=source_stat,
+                cutout_size=cutout_size,
+                max_stars=psf_max_stars,
+                mask=source_mask,
+            )
+            diff.append_note(
+                "build_subtraction_psf",
+                (
+                    f"source={psf_source} stars_used={stars_used} "
+                    f"fwhm={diff.analytical_psf.fwhm:.3f} "
+                    f"rms={np.nanmedian(fit_table['residual_rms']):.3f}"
+                ),
+            )
+
+        return diff
 
     @_step(error_flag=ImageFlag.APPHOT_ERROR)
     def run_aperture_photometry(

@@ -1,4 +1,4 @@
 {
-  "include": ["*.py", "tests"],
-  "extraPaths": [".."]
+  "include": ["photometry", "tests"],
+  "extraPaths": ["."]
 }

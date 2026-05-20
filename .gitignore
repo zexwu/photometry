@@ -1,2 +1,6 @@
 __pycache__
 tmp
+.venv
+*.egg-info
+build
+dist

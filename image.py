@@ -32,8 +32,11 @@ from .fwhm import estimate_stellar_fwhm
 from .io import ImageStat, load_fits_image, write_fits_image
 from .photometry import (
     build_epsf_model,
+    build_analytical_moffat_psf,
+    plot_analytical_psf_photometry_diagnostics,
     plot_epsf_cutouts,
     plot_epsf_photometry_diagnostics,
+    run_analytical_psf_photometry,
     run_aperture_photometry,
     run_dophot_catalog,
     run_epsf_photometry,
@@ -52,6 +55,7 @@ class ImageFlag(IntEnum):
     APPHOT_ERROR = 4
     DOPHOT_ERROR = 5
     MATCH_ERROR = 6
+    PSF_ERROR = 7
 
 
 def _step(*, error_flag: ImageFlag | None = None):
@@ -87,6 +91,7 @@ class Image:
     note: str = ""
     flag: ImageFlag = ImageFlag.OK
     epsf: Any | None = None
+    analytical_psf: Any | None = None
 
     def __post_init__(self) -> None:
         self.path = Path(self.path).expanduser()
@@ -184,6 +189,8 @@ class Image:
         self.stat.fwhm = np.nan
         self.stat.background = np.nan
         self.stat.background2d = None
+        self.epsf = None
+        self.analytical_psf = None
         return self
 
     def sort_by(self: Image, kwd: str | list[str] = "mag") -> Image:
@@ -388,6 +395,7 @@ class Image:
         oversample: int = 2,
         max_stars: int = 25,
         inspect: bool = True,
+        maxiters: int = 10,
     ) -> Image:
         """Build an ePSF model from isolated stars."""
         if cutout_size is None:
@@ -403,6 +411,7 @@ class Image:
             oversample=oversample,
             max_stars=max_stars,
             mask=self.mask,
+            maxiters=maxiters,
         )
         if inspect:
             plot_epsf_cutouts(stars)
@@ -413,7 +422,44 @@ class Image:
         )
         return self
 
-    @_step()
+    @_step(error_flag=ImageFlag.PSF_ERROR)
+    def build_analytical_psf(
+        self,
+        cutout_size: int | None = None,
+        max_stars: int = 25,
+        isolation_radius: float | None = None,
+        contamination_fraction: float = 0.2,
+    ) -> Image:
+        """Fit a robust analytical elliptical Moffat PSF model."""
+        if cutout_size is None:
+            fwhm = self.stat.fwhm if np.isfinite(self.stat.fwhm) else 3.0
+            cutout_size = int(np.ceil(6 * fwhm))
+        cutout_size = max(7, int(cutout_size))
+        if cutout_size % 2 == 0:
+            cutout_size += 1
+
+        self.analytical_psf, fit_table, stars_used = build_analytical_moffat_psf(
+            self.data,
+            self.catalog,
+            stat=self.stat,
+            cutout_size=cutout_size,
+            max_stars=max_stars,
+            mask=self.mask,
+            isolation_radius=isolation_radius,
+            contamination_fraction=contamination_fraction,
+        )
+        self.append_note(
+            "build_analytical_psf",
+            (
+                f"stars_used={stars_used} cutout_size={cutout_size} "
+                f"fwhm={self.analytical_psf.fwhm:.3f} "
+                f"ellipticity={self.analytical_psf.ellipticity:.3f} "
+                f"rms={np.nanmedian(fit_table['residual_rms']):.3f}"
+            ),
+        )
+        return self
+
+    @_step(error_flag=ImageFlag.PSF_ERROR)
     def run_epsf_photometry(
         self,
         cutout_size: int = 9,
@@ -438,6 +484,51 @@ class Image:
             )
 
         self.append_note("run_epsf_photometry", f"fitted={len(self.catalog)}")
+        return self
+
+    @_step(error_flag=ImageFlag.PSF_ERROR)
+    def run_analytical_psf_photometry(
+        self,
+        *,
+        zeropoint: float = 25.0,
+        fit_radius: float | None = None,
+        maxiters: int = 3,
+        inspect: bool = False,
+    ) -> Image:
+        """Run iterative analytical Moffat PSF photometry."""
+        self.catalog, result = run_analytical_psf_photometry(
+            self.data,
+            self.catalog,
+            psf=self.analytical_psf,
+            stat=self.stat,
+            zeropoint=zeropoint,
+            mask=self.mask,
+            fit_radius=fit_radius,
+            maxiters=maxiters,
+        )
+
+        if len(self.catalog) == 0:
+            self.flag = ImageFlag.PSF_ERROR
+            self.append_note(
+                "run_analytical_psf_photometry",
+                "no valid stars after analytical PSF photometry",
+                error=True,
+            )
+            return self
+
+        if inspect:
+            plot_analytical_psf_photometry_diagnostics(
+                self.data,
+                self.catalog,
+                psf=self.analytical_psf,
+                result=result,
+                stat=self.stat,
+            )
+
+        self.append_note(
+            "run_analytical_psf_photometry",
+            f"fitted={len(self.catalog)} iterations={result.n_iterations}",
+        )
         return self
 
     @_step(error_flag=ImageFlag.APPHOT_ERROR)

@@ -17,6 +17,32 @@ These two files can be used independently of the pipeline.
 - `photometry.py`: aperture/ePSF/DoPHOT-related photometry helpers.
 - `catalog.py`: catalog container, alignment logic, and diagnostics plotting.
 
+## Analytical PSF Photometry
+
+The package now includes a pure-Python analytical PSF workflow based on an
+elliptical, rotated 2D Moffat profile:
+
+- robust isolated-star PSF building with outlier rejection
+- iterative neighbor-subtracted PSF fitting for crowded fields
+- residual-image diagnostics for model quality checks
+
+Minimal usage:
+
+```python
+from photometry.image import Image
+
+img = (
+    Image(path="./sci/sci_frame.fits")
+    .detect_sources()
+    .estimate_fwhm()
+    .build_analytical_psf(max_stars=30)
+    .run_analytical_psf_photometry(zeropoint=25.0, inspect=True)
+)
+
+print(img.analytical_psf)
+print(img.catalog.mag[:5], img.catalog.mag_err[:5])
+```
+
 ## Showcase
 
 Minimal usage with aperture photometry and catalog alignment:

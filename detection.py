@@ -63,6 +63,7 @@ def detect_star_catalog(
                 sigma_clip=SigmaClip(sigma=3.0),
                 bkg_estimator=MedianBackground(),
                 mask=mask,
+                exclude_percentile=20
             )
             bkg_image = np.asarray(bkg2d.background, dtype=float)
             background2d = bkg_image
